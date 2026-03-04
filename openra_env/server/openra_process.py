@@ -76,6 +76,8 @@ class OpenRAProcessManager:
 
         env = os.environ.copy()
         env.setdefault("DOTNET_ROLL_FORWARD", "LatestMajor")
+        # Pass gRPC port so each OpenRA process binds a unique port
+        env["RL_GRPC_PORT"] = str(self.config.grpc_port)
 
         self._process = subprocess.Popen(
             cmd,

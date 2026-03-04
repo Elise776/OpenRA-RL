@@ -1384,17 +1384,20 @@ class OpenRAEnvironment(MCPEnvironment):
 
         @configurable_tool
         def advance(ticks: int = 1) -> dict:
-            """Advance the game by N ticks (max 500 per call, ~25 ticks = 1 second).
+            """Advance the game by N ticks at accelerated speed (~25 ticks = 1 game-second).
             Production, movement, combat, and building auto-placement all require
             game time to progress — nothing happens without calling advance().
             Also triggers auto-placement of buildings queued via build_and_place().
             Typical build times: power plant ~300 ticks, barracks ~500 ticks,
             war factory ~750 ticks. Returns updated game summary."""
             requested = ticks
-            ticks = max(1, min(ticks, 500))  # clamp to [1, 500]
+            ticks = max(1, min(ticks, 5000))  # clamp to [1, 5000]
             try:
+                async def _do_fast_advance():
+                    await env._ensure_session_started()
+                    return await env._bridge.fast_advance(ticks)
                 future = asyncio.run_coroutine_threadsafe(
-                    env._bridge.wait_ticks(ticks), env._loop
+                    _do_fast_advance(), env._loop
                 )
                 proto_obs = future.result(timeout=300)
                 obs_dict = observation_to_dict(proto_obs)

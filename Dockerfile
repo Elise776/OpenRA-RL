@@ -15,7 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Clone OpenRA source from GitHub (works on HF Spaces where submodules aren't initialized)
 ARG OPENRA_REPO=https://github.com/yxc20089/OpenRA.git
-RUN git clone --depth=1 "$OPENRA_REPO" /src/openra
+ARG OPENRA_BRANCH=feature/reward-vector-exploration
+RUN git clone --depth=1 --branch "$OPENRA_BRANCH" "$OPENRA_REPO" /src/openra
 WORKDIR /src/openra
 
 # Fix Windows CRLF line endings in shell scripts (git autocrlf on Windows adds \r)
