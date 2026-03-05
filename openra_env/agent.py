@@ -713,6 +713,28 @@ async def run_agent(config, verbose: bool = False):
 
         # Initialize conversation
         system_prompt = load_system_prompt(config)
+
+        # ─── Cross-Episode Memory (ERL) ─────────────────────────────
+        memory = None
+        event_tracker = None
+        agent_cfg = config.agent
+        if getattr(agent_cfg, "memory_enabled", True):
+            from pathlib import Path
+            from openra_env.memory import GameMemory, EventTracker
+            memory_dir = Path(getattr(agent_cfg, "memory_dir", "~/.openra-rl/memory")).expanduser()
+            memory = GameMemory(memory_dir)
+            event_tracker = EventTracker()
+            memory_context = memory.get_context(
+                max_entries=getattr(agent_cfg, "memory_max_entries", 5)
+            )
+            if memory_context:
+                system_prompt += f"\n\n## 历史对局经验\n{memory_context}"
+                print(f"Loaded {memory.episode_count} episodes from memory (win rate: {memory.win_rate:.0%})")
+            elif memory.episode_count > 0:
+                print(f"Memory: {memory.episode_count} episodes loaded")
+            else:
+                print("Memory: empty (first game)")
+
         messages = [{"role": "system", "content": system_prompt}]
 
         # ─── Pre-Game Planning Phase ──────────────────────────────────
@@ -870,6 +892,11 @@ async def run_agent(config, verbose: bool = False):
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 3
 
+        # In-game checkpoint: periodic strategy evaluation
+        CHECKPOINT_INTERVAL = getattr(config.agent, "checkpoint_interval", 3000)
+        _last_checkpoint_tick = 0
+        _checkpoint_just_fired = False
+
         turn = 0
         while True:
             # Check limits
@@ -893,6 +920,9 @@ async def run_agent(config, verbose: bool = False):
             if total_api_calls > 0:
                 try:
                     briefing_state = await env.call_tool("get_game_state")
+                    # Track in-game events for cross-episode reflection
+                    if event_tracker and isinstance(briefing_state, dict):
+                        event_tracker.update_from_state(briefing_state)
                     briefing = format_state_briefing(briefing_state)
                     if briefing:
                         messages.append({"role": "user", "content": briefing})
@@ -905,6 +935,41 @@ async def run_agent(config, verbose: bool = False):
                         game_done = True
                         print(f"\n  GAME OVER: {briefing_state.get('result', '?').upper()} at tick {briefing_state.get('tick', '?')}")
                         break
+                    # ─── In-Game Checkpoint Evaluation ───────────
+                    _cur_tick = briefing_state.get("tick", 0) if isinstance(briefing_state, dict) else 0
+                    if (event_tracker
+                            and CHECKPOINT_INTERVAL > 0
+                            and _cur_tick - _last_checkpoint_tick >= CHECKPOINT_INTERVAL
+                            and _cur_tick > 0):
+                        _last_checkpoint_tick = _cur_tick
+                        _mil = briefing_state.get("military", {})
+                        _eco = briefing_state.get("economy", {})
+                        _kd = _mil.get("kills_cost", 0) / max(_mil.get("deaths_cost", 1), 1)
+                        _timeline = event_tracker.format_timeline()
+                        _checkpoint_msg = (
+                            f"STRATEGY CHECKPOINT (t={_cur_tick}, ~{_cur_tick // 25}s)\n"
+                            f"K/D value ratio: {_kd:.2f} | "
+                            f"Army: ${_mil.get('army_value', 0)} | "
+                            f"Cash: ${_eco.get('cash', 0)}\n"
+                        )
+                        if _timeline:
+                            _checkpoint_msg += f"{_timeline}\n"
+                        _checkpoint_msg += (
+                            "Evaluate the current situation and adjust strategy. "
+                            "If the current approach is working, continue. "
+                            "If not, state clearly what needs to change."
+                        )
+                        messages.append({
+                            "role": "user",
+                            "content": _checkpoint_msg,
+                        })
+                        _checkpoint_just_fired = True
+                        if verbose:
+                            print(f"\n  {'=' * 50}")
+                            print(f"  >>> CHECKPOINT FIRED at t={_cur_tick} (~{_cur_tick // 25}s)")
+                            print(f"  >>> K/D={_kd:.2f} | army=${_mil.get('army_value', 0)} | cash=${_eco.get('cash', 0)}")
+                            print(f"  {'=' * 50}")
+
                 except Exception:
                     pass
 
@@ -950,7 +1015,14 @@ async def run_agent(config, verbose: bool = False):
 
             # Print assistant's reasoning
             if assistant_msg.get("content") and verbose:
-                print(f"\n  [LLM thinks] {assistant_msg['content'][:200]}")
+                if _checkpoint_just_fired:
+                    print(f"\n  {'~' * 50}")
+                    print(f"  <<< CHECKPOINT RESPONSE >>>")
+                    print(f"  {assistant_msg['content'][:800]}")
+                    print(f"  {'~' * 50}")
+                    _checkpoint_just_fired = False
+                else:
+                    print(f"\n  [LLM thinks] {assistant_msg['content'][:500]}")
 
             # Handle tool calls
             tool_calls = assistant_msg.get("tool_calls", [])
@@ -984,6 +1056,10 @@ async def run_agent(config, verbose: bool = False):
                 try:
                     result = await env.call_tool(fn_name, **fn_args)
                     consecutive_errors = 0
+                    # Track tool results for cross-episode reflection
+                    if event_tracker and isinstance(result, dict):
+                        _tick = result.get("tick", 0)
+                        event_tracker.update_from_tool_result(fn_name, fn_args, result, _tick)
                 except Exception as e:
                     result = {"error": str(e)}
                     # Suggest similar tools for unknown tool errors
@@ -1104,6 +1180,74 @@ async def run_agent(config, verbose: bool = False):
                 print(f"Replay: {replay['path']}")
         except Exception:
             pass
+
+        # ─── Cross-Episode Reflection (ERL) ─────────────────────────
+        if memory is not None:
+            try:
+                _final = final  # reuse final state from scorecard
+                _result = _final.get("result", "ongoing")
+                _ticks = _final.get("tick", 0)
+                _faction = _final.get("faction", "unknown")
+                _mil = _final.get("military", {})
+                _eco = _final.get("economy", {})
+                _stats = {
+                    "units_killed": _mil.get("units_killed", 0),
+                    "units_lost": _mil.get("units_lost", 0),
+                    "kills_cost": _mil.get("kills_cost", 0),
+                    "deaths_cost": _mil.get("deaths_cost", 0),
+                    "buildings_killed": _mil.get("buildings_killed", 0),
+                    "buildings_lost": _mil.get("buildings_lost", 0),
+                    "army_value": _mil.get("army_value", 0),
+                    "cash_remaining": _eco.get("cash", 0),
+                }
+                _opponent = getattr(config.opponent, "bot_type", "unknown")
+
+                from openra_env.memory import build_reflection_prompt, parse_reflection_response
+                _event_timeline = ""
+                if event_tracker:
+                    _event_timeline = event_tracker.format_timeline()
+                _ref_prompt = build_reflection_prompt(
+                    result=_result, ticks=_ticks, faction=_faction,
+                    opponent=_opponent, stats=_stats,
+                    planning_strategy=planning_strategy,
+                    event_timeline=_event_timeline,
+                )
+                print("Generating post-game reflection...")
+                _ref_response = await chat_completion(
+                    [{"role": "system", "content": "You are an RTS game analyst. Provide concise match analysis."},
+                     {"role": "user", "content": _ref_prompt}],
+                    tools=[], llm_config=llm_config, verbose=False,
+                    prompts=config.prompts,
+                )
+                if _ref_response:
+                    _ref_text = _ref_response["choices"][0]["message"].get("content", "")
+                    _reflection, _lessons = parse_reflection_response(_ref_text)
+                    _events = event_tracker.summary() if event_tracker else []
+                    memory.add_episode(
+                        result=_result, ticks=_ticks, faction=_faction,
+                        opponent=_opponent, stats=_stats,
+                        reflection=_reflection, lessons=_lessons,
+                        events=_events,
+                    )
+                    memory.save()
+                    print(f"Memory saved: episode #{memory.episode_count} ({_result})")
+                    if _reflection:
+                        print(f"  Reflection: {_reflection[:150]}")
+                    for i, l in enumerate(_lessons, 1):
+                        print(f"  Lesson {i}: {l}")
+                else:
+                    # LLM unavailable — save stats without reflection
+                    _events = event_tracker.summary() if event_tracker else []
+                    memory.add_episode(
+                        result=_result, ticks=_ticks, faction=_faction,
+                        opponent=_opponent, stats=_stats,
+                        reflection="(reflection unavailable)", lessons=[],
+                        events=_events,
+                    )
+                    memory.save()
+                    print(f"Memory saved: episode #{memory.episode_count} (no reflection)")
+            except Exception as e:
+                print(f"  [Memory] Reflection failed: {e}")
 
         # Auto-export bench submission JSON (always local, upload gated on errors)
         should_export, should_upload, skip_reason = _bench_export_policy(encountered_agent_error)

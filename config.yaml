@@ -123,6 +123,10 @@ opponent:
 #   agent_url: ""                     # GitHub/project URL shown on leaderboard ($AGENT_URL)
 #   bench_upload: true                 # Auto-upload results after each game ($BENCH_UPLOAD)
 #   bench_url: "https://openra-rl-openra-bench.hf.space"  # Leaderboard URL ($BENCH_URL)
+#   memory_enabled: true               # Cross-episode memory (ERL-style reflection)
+#   memory_dir: "~/.openra-rl/memory"  # Directory for memory.json
+#   memory_max_entries: 5              # Max episodes injected into system prompt
+#   checkpoint_interval: 3000          # Ticks between in-game checkpoints (0 = disabled)
 
 # ── Prompts ──────────────────────────────────────────────────────────
 # All LLM-facing text. Override individual fields here, or point

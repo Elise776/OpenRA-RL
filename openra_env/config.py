@@ -153,6 +153,10 @@ class AgentConfig(BaseModel):
     hf_token: str = ""  # HuggingFace token for verified bench submissions
     system_prompt: str = ""  # deprecated — use prompts.system_prompt
     system_prompt_file: str = ""  # deprecated — use prompts.system_prompt_file
+    memory_enabled: bool = True  # Cross-episode memory (ERL-style reflection)
+    memory_dir: str = "~/.openra-rl/memory"  # Directory for memory.json
+    memory_max_entries: int = 5  # Max episodes injected into system prompt
+    checkpoint_interval: int = 3000  # Ticks between in-game checkpoints (0 = disabled)
 
 
 class AlertPromptsConfig(BaseModel):
