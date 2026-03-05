@@ -177,6 +177,8 @@ class BridgeClient:
         while self._obs_tick <= current_tick:
             self._check_reader_alive()
             self._obs_event.clear()
+            if self._obs_tick > current_tick:
+                break
             await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
 
         return self._latest_obs
@@ -190,10 +192,46 @@ class BridgeClient:
         target_tick = self._obs_tick + n
         while self._obs_tick < target_tick:
             self._check_reader_alive()
-            self._obs_event.clear()
-            await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
             if self._latest_obs and self._latest_obs.done:
                 break
+            self._obs_event.clear()
+            if self._obs_tick >= target_tick:
+                break
+            await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
+        return self._latest_obs
+
+    async def fast_advance(self, n: int) -> rl_bridge_pb2.GameObservation:
+        """Fast-forward N game ticks at CPU speed (no real-time sleeping).
+
+        Sends a FAST_ADVANCE command that temporarily sets the game engine's
+        tickScale to near-zero, processing N ticks as fast as the CPU allows.
+        Normal game speed is restored automatically after N ticks.
+
+        Returns the observation at or after the target tick.
+        """
+        if self._session_call is None:
+            raise RuntimeError("Session not started. Call start_session() first.")
+
+        target_tick = self._obs_tick + n
+        action = rl_bridge_pb2.AgentAction(
+            commands=[
+                rl_bridge_pb2.Command(
+                    action=rl_bridge_pb2.FAST_ADVANCE,
+                    ticks=n,
+                )
+            ]
+        )
+        await self._action_queue.put(action)
+
+        # Wait for the game to reach the target tick
+        while self._obs_tick < target_tick:
+            self._check_reader_alive()
+            if self._latest_obs and self._latest_obs.done:
+                break
+            self._obs_event.clear()
+            if self._obs_tick >= target_tick:
+                break
+            await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
         return self._latest_obs
 
     async def observe(self) -> Optional[rl_bridge_pb2.GameObservation]:
@@ -402,6 +440,7 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
         "power_down": rl_bridge_pb2.POWER_DOWN,
         "set_primary": rl_bridge_pb2.SET_PRIMARY,
         "surrender": rl_bridge_pb2.SURRENDER,
+        "fast_advance": rl_bridge_pb2.FAST_ADVANCE,
     }
 
     proto_commands = []
@@ -415,6 +454,7 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
             target_y=cmd.get("target_y", 0),
             item_type=cmd.get("item_type", ""),
             queued=cmd.get("queued", False),
+            ticks=cmd.get("ticks", 0),
         )
         proto_commands.append(proto_cmd)
 

@@ -2524,6 +2524,7 @@ class TestAdvanceClamping:
         async def mock_wait_ticks(t):
             return MagicMock()
         mock_bridge.wait_ticks = mock_wait_ticks
+        mock_bridge.fast_advance = AsyncMock(return_value=MagicMock())
         env._bridge = mock_bridge
 
         # Patch observation_to_dict

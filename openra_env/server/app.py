@@ -15,11 +15,28 @@ from openenv.core.env_server import create_app
 from openra_env.models import OpenRAAction, OpenRAObservation
 from openra_env.server.openra_environment import OpenRAEnvironment
 
+# Support concurrent game instances by assigning unique gRPC ports.
+# Each WebSocket session gets its own OpenRA process on a different port.
+_base_grpc_port = int(os.getenv("GRPC_BASE_PORT", "9999"))
+_max_concurrent = int(os.getenv("MAX_CONCURRENT_GAMES", "8"))
+_next_port_offset = 0
+_port_lock = __import__("threading").Lock()
+
+
+def _env_factory():
+    global _next_port_offset
+    with _port_lock:
+        port = _base_grpc_port + (_next_port_offset % _max_concurrent)
+        _next_port_offset += 1
+    return OpenRAEnvironment(grpc_port=port)
+
+
 app = create_app(
-    OpenRAEnvironment,
+    _env_factory,
     OpenRAAction,
     OpenRAObservation,
     env_name="openra_env",
+    max_concurrent_envs=_max_concurrent,
 )
 
 
