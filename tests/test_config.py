@@ -620,12 +620,10 @@ class TestPromptsConfig:
         result = p.game_start.format(
             strategy_section="\n\nRush strategy",
             briefing="Map: test",
-            barracks_type="barr",
             mcv_note=" Your MCV is unit 42.",
         )
         assert "Game started!" in result
         assert "Rush strategy" in result
-        assert "barr" in result
         assert "unit 42" in result
 
     def test_insufficient_funds_template(self):

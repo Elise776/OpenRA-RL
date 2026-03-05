@@ -228,11 +228,8 @@ class PromptsConfig(BaseModel):
     planning_complete: str = "Planning complete. Game is now live."
 
     # ── Game start ───────────────────────────────────────────────────
-    # Variables: {strategy_section}, {briefing}, {barracks_type}, {mcv_note}
-    game_start: str = (
-        "Game started!{strategy_section}\n\n{briefing}\n\n"
-        "Your barracks type is '{barracks_type}'.{mcv_note}"
-    )
+    # Variables: {strategy_section}, {briefing}, {mcv_note}
+    game_start: str = "Game started!{strategy_section}\n\n{briefing}{mcv_note}"
 
     # ── Agent nudges ─────────────────────────────────────────────────
     no_tool_nudge: str = "No tool was called. A tool call is required each turn."
