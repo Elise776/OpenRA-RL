@@ -1465,6 +1465,17 @@ async def run_agent(config, verbose: bool = False):
                 "api_calls": total_api_calls,
                 "duration_s": round(elapsed, 2),
             }
+            start_state = {
+                "map": match_map_name,
+                "seed": getattr(config.game, "seed", None),
+                "class": getattr(config.game, "mod", ""),
+                "mod": getattr(config.game, "mod", ""),
+                "opponent": config.opponent.bot_type,
+                "ai_slot": getattr(config.opponent, "ai_slot", ""),
+                "faction": final.get("faction", "") or state.get("faction", ""),
+                "engine_version": image_version,
+                "planning_enabled": bool(planning_status.get("planning_enabled", True)),
+            }
             run_artifact = {
                 "schema_version": 1,
                 "run_id": run_id,
@@ -1492,6 +1503,7 @@ async def run_agent(config, verbose: bool = False):
                 "engine": {
                     "image_version": image_version,
                 },
+                "start_state": start_state,
                 "summary": summary,
                 "events": event_tracker.summary() if event_tracker else [],
                 "messages": trace_messages,

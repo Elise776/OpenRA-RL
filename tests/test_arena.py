@@ -44,6 +44,44 @@ def test_resolve_compare_entry_from_run_artifact(tmp_path, monkeypatch):
     assert entry["metadata"]["map"] == "singles"
 
 
+def test_extract_start_state_and_compatibility():
+    from openra_env import arena_data
+
+    left = {
+        "config": {
+            "game": {"map_name": "singles.oramap", "seed": 7, "mod": "ra"},
+            "opponent": {"bot_type": "easy", "ai_slot": "Multi0"},
+        },
+        "match": {"map_name": "singles.oramap", "opponent": "easy", "faction": "france"},
+        "engine": {"image_version": "0.4.1-ra"},
+    }
+    right = {
+        "config": {
+            "game": {"map_name": "singles.oramap", "seed": 7, "mod": "ra"},
+            "opponent": {"bot_type": "easy", "ai_slot": "Multi0"},
+        },
+        "match": {"map_name": "singles.oramap", "opponent": "easy", "faction": "france"},
+        "engine": {"image_version": "0.4.1-ra"},
+    }
+    mismatch = {
+        "config": {
+            "game": {"map_name": "singles.oramap", "seed": 9, "mod": "ra"},
+            "opponent": {"bot_type": "easy", "ai_slot": "Multi0"},
+        },
+        "match": {"map_name": "singles.oramap", "opponent": "easy", "faction": "france"},
+        "engine": {"image_version": "0.4.1-ra"},
+    }
+
+    left_entry = arena_data.build_run_browser_entry_from_artifact({"run_id": "left", **left, "replay": {}})
+    right_entry = arena_data.build_run_browser_entry_from_artifact({"run_id": "right", **right, "replay": {}})
+    mismatch_entry = arena_data.build_run_browser_entry_from_artifact({"run_id": "mismatch", **mismatch, "replay": {}})
+
+    assert left_entry["start_state"]["class"] == "ra"
+    assert left_entry["start_state"]["seed"] == 7
+    assert arena_data.runs_are_compatible(left_entry, right_entry, ["map", "seed", "class"])
+    assert not arena_data.runs_are_compatible(left_entry, mismatch_entry, ["map", "seed", "class"])
+
+
 def test_export_preference_pairs(tmp_path, monkeypatch):
     from openra_env import arena_data
 
@@ -96,3 +134,86 @@ def test_export_preference_pairs(tmp_path, monkeypatch):
     assert payload["chosen_run_id"] == "run_left"
     assert payload["rejected_run_id"] == "run_right"
     assert payload["chosen"]["text"].startswith("[user] left")
+
+
+def test_arena_controller_and_fastapi_routes():
+    from fastapi.testclient import TestClient
+
+    from openra_env.arena_server import ArenaController
+    from openra_env.server import app as server_app
+
+    runs = [{
+        "run_id": "run_demo",
+        "label": "DemoBot",
+        "replay_available": True,
+        "metadata": {"result": "win"},
+        "start_state": {"map": "singles", "seed": 7, "class": "ra"},
+        "search_blob": "run_demo demobot singles",
+    }]
+    session = {
+        "left": {"run_id": "run_a", "slot": "left", "port": 6080},
+        "right": {"run_id": "run_b", "slot": "right", "port": 6081},
+        "comparison_mode": "fair",
+        "fair_fields": ["map", "seed"],
+    }
+    saved_votes: list[str] = []
+    stop_calls: list[str] = []
+
+    def _list_runs():
+        return runs
+
+    def _start_compare(left_run_id, right_run_id, comparison_mode, fair_fields):
+        assert left_run_id == "run_demo"
+        assert right_run_id == "run_demo"
+        assert comparison_mode == "ab"
+        assert fair_fields == ["map"]
+        return session
+
+    def _save_preference(side):
+        saved_votes.append(side)
+        return "saved.json"
+
+    def _stop_compare():
+        stop_calls.append("stop")
+
+    controller = ArenaController(
+        list_runs=_list_runs,
+        start_compare=_start_compare,
+        save_preference=_save_preference,
+        stop_compare=_stop_compare,
+        fair_fields=[{"key": "map", "label": "Map"}],
+        default_fair_fields=["map"],
+    )
+    client = TestClient(server_app.app)
+
+    server_app.configure_arena_controller(controller)
+    try:
+        root_html = client.get("/arena")
+        state_payload = client.get("/arena/state")
+
+        assert root_html.status_code == 200
+        assert "Replay Arena" in root_html.text
+        assert "Fair Comparison" in root_html.text
+        assert state_payload.status_code == 200
+        assert state_payload.json()["runs"][0]["run_id"] == "run_demo"
+
+        payload = client.post(
+            "/arena/session",
+            json={
+                "left_run_id": "run_demo",
+                "right_run_id": "run_demo",
+                "comparison_mode": "ab",
+                "fair_fields": ["map"],
+            },
+        ).json()
+        assert payload["session"]["comparison_mode"] == "fair"
+
+        vote_payload = client.post("/arena/preferences", json={"preferred_side": "left"}).json()
+        assert vote_payload["path"] == "saved.json"
+        assert saved_votes == ["left"]
+
+        stop_response = client.delete("/arena/session")
+        assert stop_response.status_code == 200
+        assert stop_calls == ["stop"]
+    finally:
+        server_app.configure_arena_controller(None)

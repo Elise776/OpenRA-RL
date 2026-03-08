@@ -15,6 +15,16 @@ BASE_DIR = Path.home() / ".openra-rl"
 RUNS_DIR = BASE_DIR / "runs"
 PREFERENCES_DIR = BASE_DIR / "preferences"
 EXPORTS_DIR = BASE_DIR / "arena-exports"
+FAIR_MATCH_FIELD_DEFS = [
+    {"key": "map", "label": "Map"},
+    {"key": "seed", "label": "Seed"},
+    {"key": "class", "label": "Class / Mod"},
+    {"key": "opponent", "label": "Opponent"},
+    {"key": "faction", "label": "Faction"},
+    {"key": "engine_version", "label": "Engine"},
+    {"key": "ai_slot", "label": "AI Slot"},
+]
+DEFAULT_FAIR_MATCH_FIELDS = ["map", "seed", "class", "opponent", "faction", "engine_version"]
 
 
 def _utc_now() -> datetime:
@@ -121,6 +131,51 @@ def _replay_filename_from_path(replay_path: str) -> str:
     return Path(replay_path).name
 
 
+def _normalize_match_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip().lower()
+
+
+def extract_start_state(artifact: dict[str, Any]) -> dict[str, Any]:
+    """Normalize start-state metadata used for fair run comparisons."""
+    existing = artifact.get("start_state", {})
+    if isinstance(existing, dict) and existing:
+        return {
+            "map": existing.get("map", existing.get("map_name", "")),
+            "seed": existing.get("seed", ""),
+            "class": existing.get("class", existing.get("mod", "")),
+            "mod": existing.get("mod", existing.get("class", "")),
+            "opponent": existing.get("opponent", ""),
+            "ai_slot": existing.get("ai_slot", ""),
+            "faction": existing.get("faction", ""),
+            "engine_version": existing.get("engine_version", ""),
+            "planning_enabled": existing.get("planning_enabled", ""),
+        }
+
+    config = artifact.get("config", {})
+    game_cfg = config.get("game", {}) if isinstance(config, dict) else {}
+    opponent_cfg = config.get("opponent", {}) if isinstance(config, dict) else {}
+    match = artifact.get("match", {})
+    engine = artifact.get("engine", {})
+
+    map_name = match.get("map_name") or game_cfg.get("map_name", "")
+    mod_name = game_cfg.get("mod", "")
+    return {
+        "map": map_name,
+        "seed": game_cfg.get("seed", ""),
+        "class": mod_name,
+        "mod": mod_name,
+        "opponent": match.get("opponent") or opponent_cfg.get("bot_type", ""),
+        "ai_slot": opponent_cfg.get("ai_slot", ""),
+        "faction": match.get("faction", ""),
+        "engine_version": engine.get("image_version", ""),
+        "planning_enabled": match.get("planning_enabled", ""),
+    }
+
+
 def resolve_compare_entry(reference: Optional[str], slot: str) -> dict[str, Any]:
     """Resolve a compare input into run/replay metadata.
 
@@ -200,6 +255,7 @@ def build_compare_entry_from_artifact(artifact: dict[str, Any], slot: str) -> di
     summary = artifact.get("summary", {})
     match = artifact.get("match", {})
     agent = artifact.get("agent", {})
+    start_state = extract_start_state(artifact)
     run_id = artifact.get("run_id") or _slugify(replay_filename or "run")
     label = agent.get("name") or agent.get("model") or run_id
     return {
@@ -210,15 +266,76 @@ def build_compare_entry_from_artifact(artifact: dict[str, Any], slot: str) -> di
         "title": f"{label} ({run_id})",
         "replay_path": local_replay,
         "replay_filename": replay_filename,
+        "created_at": artifact.get("created_at") or artifact.get("saved_at", ""),
+        "start_state": start_state,
+        "summary": summary,
+        "agent": {
+            "name": agent.get("name", ""),
+            "type": agent.get("type", ""),
+            "model": agent.get("model", ""),
+        },
         "metadata": {
             "source": "run",
-            "map": match.get("map_name", ""),
-            "opponent": match.get("opponent", ""),
+            "map": start_state.get("map", ""),
+            "seed": start_state.get("seed", ""),
+            "class": start_state.get("class", ""),
+            "opponent": start_state.get("opponent", ""),
+            "ai_slot": start_state.get("ai_slot", ""),
+            "faction": start_state.get("faction", ""),
+            "engine_version": start_state.get("engine_version", ""),
             "model": agent.get("model", ""),
+            "agent_type": agent.get("type", ""),
             "result": summary.get("result", ""),
             "ticks": summary.get("ticks", ""),
         },
     }
+
+
+def build_run_browser_entry_from_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    """Build the compact run catalog entry consumed by the browser UI."""
+    entry = build_compare_entry_from_artifact(artifact, slot="candidate")
+    start_state = entry.get("start_state", {})
+    search_parts = [
+        entry.get("run_id", ""),
+        entry.get("label", ""),
+        entry.get("agent", {}).get("model", ""),
+        entry.get("metadata", {}).get("result", ""),
+        start_state.get("map", ""),
+        start_state.get("class", ""),
+        start_state.get("opponent", ""),
+        start_state.get("faction", ""),
+        start_state.get("engine_version", ""),
+        str(start_state.get("seed", "")),
+    ]
+    entry["search_blob"] = " ".join(part for part in search_parts if part).lower()
+    entry["replay_available"] = bool(entry.get("replay_path"))
+    return entry
+
+
+def list_run_browser_entries() -> list[dict[str, Any]]:
+    """Return compact browser entries for all saved runs."""
+    entries = []
+    for path in list_run_artifacts():
+        try:
+            entries.append(build_run_browser_entry_from_artifact(_json_load(path)))
+        except (json.JSONDecodeError, OSError, TypeError):
+            continue
+    return entries
+
+
+def runs_are_compatible(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    fields: Optional[list[str]] = None,
+) -> bool:
+    """Return True when two runs match on the selected fair-comparison fields."""
+    selected_fields = fields or DEFAULT_FAIR_MATCH_FIELDS
+    left_state = left.get("start_state", {})
+    right_state = right.get("start_state", {})
+    for field in selected_fields:
+        if _normalize_match_value(left_state.get(field)) != _normalize_match_value(right_state.get(field)):
+            return False
+    return True
 
 
 def latest_compare_entries() -> tuple[dict[str, Any], dict[str, Any]]:
