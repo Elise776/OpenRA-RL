@@ -6,16 +6,12 @@ Creates the OpenEnv-compatible server using create_app().
 import asyncio
 import json
 import os
-import threading
 import time
-from dataclasses import dataclass
-from typing import Optional
 
-from fastapi import Body, HTTPException, Query
+from fastapi import Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from openenv.core.env_server import create_app
 
-from openra_env.arena_server import ArenaController, empty_arena_state, render_arena_page
 from openra_env.models import OpenRAAction, OpenRAObservation
 from openra_env.server.openra_environment import OpenRAEnvironment
 
@@ -42,35 +38,6 @@ app = create_app(
     env_name="openra_env",
     max_concurrent_envs=_max_concurrent,
 )
-
-_arena_controller: Optional[ArenaController] = None
-_arena_controller_lock = threading.Lock()
-
-
-def configure_arena_controller(controller: Optional[ArenaController]) -> None:
-    """Register or clear the arena controller for the local web UI."""
-    global _arena_controller
-    with _arena_controller_lock:
-        _arena_controller = controller
-
-
-def _get_arena_controller() -> Optional[ArenaController]:
-    with _arena_controller_lock:
-        return _arena_controller
-
-
-def _arena_snapshot() -> dict:
-    controller = _get_arena_controller()
-    if controller is None:
-        return empty_arena_state()
-    return controller.snapshot()
-
-
-def _require_arena_controller() -> ArenaController:
-    controller = _get_arena_controller()
-    if controller is None:
-        raise HTTPException(status_code=503, detail="Arena mode is not configured on this server.")
-    return controller
 
 
 # ── Try Agent: LLM demo endpoint ────────────────────────────────────────────
@@ -709,7 +676,6 @@ footer {
     </a>
     <div class="nav-links">
       <a href="/try" style="color:#ef4444;font-weight:700;">TRY</a>
-      <a href="/arena">ARENA</a>
       <a href="https://openra-rl.dev/docs/getting-started">DOCS</a>
       <a href="/docs">API</a>
       <a href="https://github.com/yxc20089/OpenRA-RL">GITHUB</a>
@@ -984,7 +950,6 @@ footer {
     </a>
     <div class="nav-links">
       <a href="/try" style="color:#ef4444;font-weight:700;">TRY</a>
-      <a href="/arena">ARENA</a>
       <a href="https://openra-rl.dev/docs/getting-started">DOCS</a>
       <a href="/docs">API</a>
       <a href="https://github.com/yxc20089/OpenRA-RL">GITHUB</a>
@@ -1195,114 +1160,6 @@ async def try_status():
 async def try_page():
     """Interactive page to watch an LLM agent play Red Alert."""
     return TRY_PAGE
-
-
-@app.get("/arena", response_class=HTMLResponse)
-async def arena_page():
-    """Interactive page for local replay pairing and preference capture."""
-    return render_arena_page(_arena_snapshot())
-
-
-@app.get("/arena/state")
-async def arena_state():
-    """Return the current local arena UI state."""
-    return _arena_snapshot()
-
-
-@app.post("/arena/session")
-async def arena_start_session(payload: dict | None = Body(default=None)):
-    """Launch a replay comparison session."""
-    controller = _require_arena_controller()
-    payload = payload or {}
-    left_run_id = str(payload.get("left_run_id", "")).strip()
-    right_run_id = str(payload.get("right_run_id", "")).strip()
-    comparison_mode = str(payload.get("comparison_mode", "fair")).strip() or "fair"
-    fair_fields = [str(field) for field in (payload.get("fair_fields") or []) if str(field)]
-    try:
-        session = controller.start_session(left_run_id, right_run_id, comparison_mode, fair_fields)
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "session": session}
-
-
-@app.post("/arena/preferences")
-async def arena_save_preference(payload: dict | None = Body(default=None)):
-    """Save a human preference for the active arena session."""
-    controller = _require_arena_controller()
-    payload = payload or {}
-    preferred_side = str(payload.get("preferred_side", "")).strip()
-    try:
-        saved_path = controller.save_vote(preferred_side)
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "path": saved_path}
-
-
-@app.delete("/arena/session")
-async def arena_stop_session():
-    """Stop both replay viewers for the current arena session."""
-    controller = _require_arena_controller()
-    controller.stop_session()
-    return {"ok": True}
-
-
-@dataclass
-class BackgroundAppServer:
-    """Background uvicorn server handle for the local web UI."""
-
-    server: object
-    thread: threading.Thread
-    base_url: str
-
-    def close(self) -> None:
-        self.server.should_exit = True
-        self.thread.join(timeout=10)
-
-
-def start_background_app_server(
-    host: str = "127.0.0.1",
-    port: int = 8090,
-    startup_timeout: float = 15.0,
-) -> BackgroundAppServer:
-    """Start this FastAPI app in a background thread for local arena use."""
-    import urllib.error
-    import urllib.request
-
-    import uvicorn
-
-    config = uvicorn.Config(
-        app,
-        host=host,
-        port=port,
-        log_level="warning",
-        ws_ping_interval=None,
-        ws_ping_timeout=None,
-    )
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-
-    base_url = f"http://{host}:{port}"
-    start = time.time()
-    last_error: Exception | None = None
-    while time.time() - start < startup_timeout:
-        if getattr(server, "started", False):
-            return BackgroundAppServer(server=server, thread=thread, base_url=base_url)
-        try:
-            req = urllib.request.urlopen(f"{base_url}/arena/state", timeout=1)
-            if req.status == 200:
-                return BackgroundAppServer(server=server, thread=thread, base_url=base_url)
-        except (urllib.error.URLError, OSError) as exc:
-            last_error = exc
-        if not thread.is_alive():
-            break
-        time.sleep(0.1)
-
-    server.should_exit = True
-    thread.join(timeout=5)
-    if last_error is not None:
-        raise OSError(f"Local web UI did not become ready on port {port}") from last_error
-    raise OSError(f"Local web UI did not become ready on port {port}")
 
 
 def main():

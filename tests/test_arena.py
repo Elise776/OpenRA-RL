@@ -139,8 +139,8 @@ def test_export_preference_pairs(tmp_path, monkeypatch):
 def test_arena_controller_and_fastapi_routes():
     from fastapi.testclient import TestClient
 
-    from openra_env.arena_server import ArenaController
-    from openra_env.server import app as server_app
+    from openra_env.arena_ui import ArenaController
+    from openra_env.local.arena_app import create_arena_app
 
     runs = [{
         "run_id": "run_demo",
@@ -184,36 +184,33 @@ def test_arena_controller_and_fastapi_routes():
         fair_fields=[{"key": "map", "label": "Map"}],
         default_fair_fields=["map"],
     )
-    client = TestClient(server_app.app)
+    client = TestClient(create_arena_app(controller))
 
-    server_app.configure_arena_controller(controller)
-    try:
-        root_html = client.get("/arena")
-        state_payload = client.get("/arena/state")
+    root_html = client.get("/arena")
+    state_payload = client.get("/arena/state")
 
-        assert root_html.status_code == 200
-        assert "Replay Arena" in root_html.text
-        assert "Fair Comparison" in root_html.text
-        assert state_payload.status_code == 200
-        assert state_payload.json()["runs"][0]["run_id"] == "run_demo"
+    assert root_html.status_code == 200
+    assert "Replay Arena" in root_html.text
+    assert "Fair Comparison" in root_html.text
+    assert "local evaluation workflow" in root_html.text
+    assert state_payload.status_code == 200
+    assert state_payload.json()["runs"][0]["run_id"] == "run_demo"
 
-        payload = client.post(
-            "/arena/session",
-            json={
-                "left_run_id": "run_demo",
-                "right_run_id": "run_demo",
-                "comparison_mode": "ab",
-                "fair_fields": ["map"],
-            },
-        ).json()
-        assert payload["session"]["comparison_mode"] == "fair"
+    payload = client.post(
+        "/arena/session",
+        json={
+            "left_run_id": "run_demo",
+            "right_run_id": "run_demo",
+            "comparison_mode": "ab",
+            "fair_fields": ["map"],
+        },
+    ).json()
+    assert payload["session"]["comparison_mode"] == "fair"
 
-        vote_payload = client.post("/arena/preferences", json={"preferred_side": "left"}).json()
-        assert vote_payload["path"] == "saved.json"
-        assert saved_votes == ["left"]
+    vote_payload = client.post("/arena/preferences", json={"preferred_side": "left"}).json()
+    assert vote_payload["path"] == "saved.json"
+    assert saved_votes == ["left"]
 
-        stop_response = client.delete("/arena/session")
-        assert stop_response.status_code == 200
-        assert stop_calls == ["stop"]
-    finally:
-        server_app.configure_arena_controller(None)
+    stop_response = client.delete("/arena/session")
+    assert stop_response.status_code == 200
+    assert stop_calls == ["stop"]

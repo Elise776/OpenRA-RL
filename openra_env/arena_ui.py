@@ -10,7 +10,7 @@ from typing import Any, Callable, Optional
 
 @dataclass
 class ArenaController:
-    """Own arena state while the FastAPI app serves the UI."""
+    """Own arena state while the local arena app serves the UI."""
 
     list_runs: Callable[[], list[dict[str, Any]]]
     start_compare: Callable[[str, str, str, list[str]], dict[str, Any]]
@@ -490,10 +490,9 @@ def _arena_body() -> str:
       <span>OPENRA<span class="rl">-RL</span></span>
     </a>
     <div class="nav-links">
-      <a href="/try">TRY</a>
-      <a href="/arena" style="color:#ef4444;font-weight:700;">ARENA</a>
+      <a href="https://openra-rl.dev">HOME</a>
+      <a href="https://openra-rl-openra-rl.hf.space/try">TRY</a>
       <a href="https://openra-rl.dev/docs/getting-started">DOCS</a>
-      <a href="/docs">API</a>
       <a href="https://github.com/yxc20089/OpenRA-RL">GITHUB</a>
     </div>
   </div>
@@ -503,7 +502,7 @@ def _arena_body() -> str:
   <section class="hero">
     <div class="hero-top">
       <div>
-        <div class="terminal-text">PAIRING MODE ONLINE</div>
+        <div class="terminal-text">LOCAL PAIRING MODE</div>
         <h1 class="alert-text">Replay Arena</h1>
       </div>
       <div class="chip-row">
@@ -515,7 +514,7 @@ def _arena_body() -> str:
     </div>
     <p>
       Select two saved runs, optionally constrain them to the same start state, and compare them directly in-page.
-      The pairing page uses the same local web app as the rest of OpenRA-RL and renders both replay sessions into page-owned viewer surfaces.
+      This arena is a local evaluation workflow, separate from the hosted TRY demo, and renders both replay sessions into page-owned viewer surfaces.
     </p>
   </section>
 

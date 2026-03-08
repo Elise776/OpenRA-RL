@@ -17,7 +17,7 @@ from openra_env.arena_data import (
     resolve_compare_entry,
     save_preference,
 )
-from openra_env.arena_server import ArenaController
+from openra_env.arena_ui import ArenaController
 from openra_env.cli.console import dim, error, header, info, step, success, warn
 from openra_env.cli import docker_manager as docker
 from openra_env.cli.wizard import (
@@ -27,7 +27,7 @@ from openra_env.cli.wizard import (
     merge_cli_into_config,
     run_wizard,
 )
-from openra_env.server.app import configure_arena_controller, start_background_app_server
+from openra_env.local.arena_app import start_background_arena_app
 
 
 def cmd_play(
@@ -596,14 +596,12 @@ def cmd_arena_compare(
         default_fair_fields=list(DEFAULT_FAIR_MATCH_FIELDS),
         initial_session=initial_session,
     )
-    configure_arena_controller(controller)
 
     try:
-        web_app = start_background_app_server(host="127.0.0.1", port=port)
+        web_app = start_background_arena_app(controller, host="127.0.0.1", port=port)
     except OSError as exc:
-        configure_arena_controller(None)
         _stop_session()
-        error(f"Could not start arena web UI on port {port}: {exc}")
+        error(f"Could not start the local arena app on port {port}: {exc}")
         sys.exit(1)
 
     arena_url = f"{web_app.base_url}/arena"
@@ -631,7 +629,6 @@ def cmd_arena_compare(
         print()
     finally:
         web_app.close()
-        configure_arena_controller(None)
         _stop_session()
 
 
