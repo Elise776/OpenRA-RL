@@ -3,10 +3,21 @@
 import shutil
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 from typing import Optional
 
+from openra_env.arena_data import (
+    DEFAULT_FAIR_MATCH_FIELDS,
+    FAIR_MATCH_FIELD_DEFS,
+    comparison_record,
+    export_preference_pairs,
+    list_run_browser_entries,
+    resolve_compare_entry,
+    save_preference,
+)
+from openra_env.arena_ui import ArenaController
 from openra_env.cli.console import dim, error, header, info, step, success, warn
 from openra_env.cli import docker_manager as docker
 from openra_env.cli.wizard import (
@@ -16,6 +27,7 @@ from openra_env.cli.wizard import (
     merge_cli_into_config,
     run_wizard,
 )
+from openra_env.local.arena_app import start_background_arena_app
 
 
 def cmd_play(
@@ -462,3 +474,173 @@ def cmd_replay_copy() -> None:
 def cmd_replay_stop() -> None:
     """Stop the replay viewer."""
     docker.stop_replay_viewer()
+
+
+# â”€â”€ Arena commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+
+def cmd_arena_compare(
+    left: Optional[str] = None,
+    right: Optional[str] = None,
+    port: int = 8090,
+    left_port: int = 6080,
+    right_port: int = 6081,
+    resolution: Optional[str] = None,
+    render_mode: Optional[str] = None,
+    vnc_quality: Optional[int] = None,
+    vnc_compression: Optional[int] = None,
+    cpu_cores: Optional[int] = None,
+) -> None:
+    """Launch the arena GUI for replay selection and side-by-side comparison."""
+    if not docker.check_docker():
+        sys.exit(1)
+
+    try:
+        viewer_settings = docker.load_replay_viewer_settings(
+            resolution=resolution,
+            render_mode=render_mode,
+            vnc_quality=vnc_quality,
+            vnc_compression=vnc_compression,
+            cpu_cores=cpu_cores,
+        )
+    except ValueError as exc:
+        error(f"Invalid replay viewer setting: {exc}")
+        sys.exit(1)
+
+    if (left and not right) or (right and not left):
+        error("Arena compare needs either two inputs or none.")
+        sys.exit(1)
+
+    session_state: dict[str, object] = {"session": None}
+
+    def _start_session(
+        left_ref: str,
+        right_ref: str,
+        comparison_mode: str,
+        fair_fields: list[str],
+    ) -> dict[str, object]:
+        left_entry = resolve_compare_entry(left_ref, slot="left")
+        right_entry = resolve_compare_entry(right_ref, slot="right")
+        left_entry["port"] = left_port
+        right_entry["port"] = right_port
+        if not left_entry.get("replay_path") or not right_entry.get("replay_path"):
+            raise RuntimeError("Both selected runs need accessible replay files.")
+
+        docker.stop_compare_viewers()
+
+        if not docker.start_replay_viewer(
+            left_entry["replay_path"],
+            port=left_port,
+            settings=viewer_settings,
+            container_name=docker.ARENA_LEFT_CONTAINER,
+        ):
+            raise RuntimeError("Failed to start the left replay viewer.")
+
+        if not docker.start_replay_viewer(
+            right_entry["replay_path"],
+            port=right_port,
+            settings=viewer_settings,
+            container_name=docker.ARENA_RIGHT_CONTAINER,
+        ):
+            docker.stop_replay_viewer(container_name=docker.ARENA_LEFT_CONTAINER)
+            raise RuntimeError("Failed to start the right replay viewer.")
+
+        session = {
+            "left": left_entry,
+            "right": right_entry,
+            "comparison_mode": comparison_mode,
+            "fair_fields": fair_fields or list(DEFAULT_FAIR_MATCH_FIELDS),
+        }
+        session_state["session"] = session
+        return session
+
+    def _save(side: str) -> str:
+        session = session_state.get("session")
+        if not isinstance(session, dict):
+            raise RuntimeError("No active arena session.")
+        label = "preferred" if side in {"left", "right"} else "skip"
+        record = comparison_record(
+            session["left"],
+            session["right"],
+            preferred_side=side,
+            label=label,
+        )
+        record["comparison_mode"] = session.get("comparison_mode", "manual")
+        record["fair_fields"] = session.get("fair_fields", [])
+        saved_path = save_preference(record)
+        return str(saved_path)
+
+    def _stop_session() -> None:
+        docker.stop_compare_viewers()
+        session_state["session"] = None
+
+    initial_session = None
+    if left and right:
+        try:
+            initial_session = _start_session(
+                left,
+                right,
+                comparison_mode="manual",
+                fair_fields=list(DEFAULT_FAIR_MATCH_FIELDS),
+            )
+        except (FileNotFoundError, RuntimeError) as exc:
+            error(str(exc))
+            sys.exit(1)
+
+    controller = ArenaController(
+        list_runs=list_run_browser_entries,
+        start_compare=_start_session,
+        save_preference=_save,
+        stop_compare=_stop_session,
+        fair_fields=FAIR_MATCH_FIELD_DEFS,
+        default_fair_fields=list(DEFAULT_FAIR_MATCH_FIELDS),
+        initial_session=initial_session,
+    )
+
+    try:
+        web_app = start_background_arena_app(controller, host="127.0.0.1", port=port)
+    except OSError as exc:
+        _stop_session()
+        error(f"Could not start the local arena app on port {port}: {exc}")
+        sys.exit(1)
+
+    arena_url = f"{web_app.base_url}/arena"
+    info(f"Opening {arena_url}")
+    webbrowser.open(arena_url)
+    print()
+    info(
+        f"Settings: {viewer_settings.width}x{viewer_settings.height}, "
+        f"render={viewer_settings.render_mode}, "
+        f"vnc q/c={viewer_settings.vnc_quality}/{viewer_settings.vnc_compression}"
+    )
+    if initial_session:
+        info("A comparison is preloaded in the browser.")
+    else:
+        count = len(list_run_browser_entries())
+        info(f"Select two saved runs in the browser. {count} run(s) available.")
+    info("Keyboard shortcuts in the compare view: 1 = prefer A, 2 = prefer B, S = skip/tie")
+    info("Press Ctrl+C to stop the arena page and both replay viewers.")
+    print()
+
+    try:
+        while web_app.thread.is_alive():
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        web_app.close()
+        _stop_session()
+
+
+def cmd_arena_export(output: Optional[str] = None) -> None:
+    """Export saved preferences as chosen/rejected JSONL."""
+    export_path, count = export_preference_pairs(output_path=output)
+    if count == 0:
+        warn("No preference pairs with matching run artifacts were found.")
+    else:
+        success(f"Exported {count} preference pair(s) to {export_path}")
+
+
+def cmd_arena_stop() -> None:
+    """Stop both arena replay viewers."""
+    docker.stop_compare_viewers()
