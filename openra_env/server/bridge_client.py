@@ -70,12 +70,12 @@ class BridgeClient:
             try:
                 self.connect()
                 state = self.get_state()
-                if state.phase == "waiting":
-                    logger.debug(f"Bridge not fully active (attempt {attempt + 1}), phase=waiting")
-                    time.sleep(retry_interval)
-                    continue
-                logger.info(f"Bridge ready after {attempt + 1} attempts, phase={state.phase}")
-                return True
+                if state.phase == "playing":
+                    logger.info(f"Bridge ready after {attempt + 1} attempts, phase={state.phase}")
+                    return True
+                logger.debug(f"Bridge not ready (attempt {attempt + 1}), phase={state.phase}")
+                time.sleep(retry_interval)
+                continue
             except grpc.RpcError as e:
                 if attempt < max_retries - 1:
                     logger.debug(f"Bridge not ready (attempt {attempt + 1}): {e.code()}")
