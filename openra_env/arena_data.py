@@ -253,7 +253,6 @@ def build_compare_entry_from_artifact(artifact: dict[str, Any], slot: str) -> di
         local_replay = str(candidate) if candidate else replay.get("path", "")
 
     summary = artifact.get("summary", {})
-    match = artifact.get("match", {})
     agent = artifact.get("agent", {})
     start_state = extract_start_state(artifact)
     run_id = artifact.get("run_id") or _slugify(replay_filename or "run")
