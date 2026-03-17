@@ -13,9 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone OpenRA source from GitHub (works on HF Spaces where submodules aren't initialized)
+# Clone OpenRA source from GitHub. The old reward-vector-exploration branch
+# was merged upstream, so default to the current OpenRA development branch.
 ARG OPENRA_REPO=https://github.com/yxc20089/OpenRA.git
-ARG OPENRA_BRANCH=feature/reward-vector-exploration
+ARG OPENRA_BRANCH=bleed
 RUN git clone --depth=1 --branch "$OPENRA_BRANCH" "$OPENRA_REPO" /src/openra
 WORKDIR /src/openra
 
