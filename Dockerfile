@@ -13,11 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone OpenRA source from GitHub. The old reward-vector-exploration branch
-# was merged upstream, so default to the current OpenRA development branch.
-ARG OPENRA_REPO=https://github.com/yxc20089/OpenRA.git
-ARG OPENRA_BRANCH=bleed
-RUN git clone --depth=1 --branch "$OPENRA_BRANCH" "$OPENRA_REPO" /src/openra
+# Use the OpenRA source checked out inside this repo so Docker builds pick up
+# local RL bridge changes and regenerated protobuf stubs.
+COPY OpenRA/ /src/openra/
 WORKDIR /src/openra
 
 # Fix Windows CRLF line endings in shell scripts (git autocrlf on Windows adds \r)
@@ -25,8 +23,10 @@ RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + && \
     find . -name '*.sh' -exec chmod +x {} +
 
 # Build with system libraries (unix-generic avoids bundled native binaries).
-# Do not set SKIP_PROTOC here: the checked-in generated RL bridge files can lag
-# behind rl_bridge.proto, so we regenerate them during the Docker build.
+# GH200 uses linux_arm64, where Grpc.Tools' bundled protoc currently crashes.
+# Keep the checked-in generated RL bridge stubs in sync with rl_bridge.proto
+# and force the build to use them on arm64.
+ENV SKIP_PROTOC=true
 RUN make TARGETPLATFORM=unix-generic CONFIGURATION=Release
 
 # Verify critical output (includes Null platform for headless RL operation)
