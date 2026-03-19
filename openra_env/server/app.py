@@ -83,6 +83,7 @@ def _check_port_free(port: int) -> None:
             ) from e
 
 if not _daemon.is_alive():
+    _daemon.reap()  # clean up zombie from previous run if any
     _check_port_free(_base_grpc_port)
     _daemon.launch()
     print(f"Game daemon launched on port {_base_grpc_port}")
@@ -95,6 +96,42 @@ app = create_app(
     env_name="openra_env",
     max_concurrent_envs=_max_concurrent,
 )
+
+
+@app.on_event("shutdown")
+def _on_shutdown():
+    """Kill the game daemon when uvicorn shuts down (SIGTERM/SIGINT)."""
+    if _daemon.is_alive():
+        print(f"Shutting down game daemon (PID {_daemon.pid})...")
+        _daemon.kill(timeout=10.0)
+    else:
+        _daemon.reap()
+
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint. Reports daemon status and reaps zombies."""
+    alive = _daemon.is_alive()
+    if not alive:
+        _daemon.reap()
+    return {
+        "status": "ok" if alive else "daemon_dead",
+        "daemon_pid": _daemon.pid,
+        "daemon_alive": alive,
+        "grpc_port": _base_grpc_port,
+    }
+
+
+@app.post("/shutdown")
+def shutdown_server():
+    """Gracefully shut down the game daemon and exit."""
+    import threading
+    def _do_shutdown():
+        time.sleep(0.5)  # let response flush
+        _daemon.kill(timeout=10.0)
+        os._exit(0)
+    threading.Thread(target=_do_shutdown, daemon=True).start()
+    return {"status": "shutting_down", "daemon_pid": _daemon.pid}
 
 
 # ── Try Agent: LLM demo endpoint ────────────────────────────────────────────

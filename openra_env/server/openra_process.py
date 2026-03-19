@@ -8,14 +8,20 @@ Supports two modes:
   - Multi-session (daemon): One long-lived process hosts many game sessions via gRPC
 """
 
+import atexit
 import logging
 import os
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Thread
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Global registry for atexit/signal cleanup
+_active_managers: list["OpenRAProcessManager"] = []
 
 # Default path to the OpenRA installation
 DEFAULT_OPENRA_PATH = os.environ.get("OPENRA_PATH", "/opt/openra")
@@ -71,6 +77,7 @@ class OpenRAProcessManager:
         """Launch a new OpenRA game instance.
 
         Returns the PID of the launched process.
+        Registers atexit/signal handlers to ensure cleanup on Python exit.
         """
         if self._process is not None and self._process.poll() is None:
             logger.warning("Killing existing OpenRA process before launching new one")
@@ -92,6 +99,11 @@ class OpenRAProcessManager:
             env=env,
         )
         logger.info(f"OpenRA launched with PID {self._process.pid}")
+
+        # Register for global cleanup
+        if self not in _active_managers:
+            _active_managers.append(self)
+
         return self._process.pid
 
     def _build_command(self) -> list[str]:
@@ -180,6 +192,7 @@ class OpenRAProcessManager:
             try:
                 exit_code = self._process.wait(timeout=timeout)
                 logger.info(f"OpenRA process {pid} terminated gracefully (exit code {exit_code})")
+                self._process = None
                 return exit_code
             except subprocess.TimeoutExpired:
                 pass
@@ -197,6 +210,19 @@ class OpenRAProcessManager:
 
         self._process = None
         return None
+
+    def reap(self) -> Optional[int]:
+        """Reap a finished child process to prevent zombies.
+
+        Returns exit code if process has exited, None if still running.
+        """
+        if self._process is None:
+            return None
+        rc = self._process.poll()  # calls waitpid(WNOHANG) internally
+        if rc is not None:
+            logger.info(f"OpenRA process {self._process.pid} exited with code {rc} (reaped)")
+            self._process = None
+        return rc
 
     def get_stdout(self) -> str:
         """Read available stdout from the process."""
@@ -242,8 +268,38 @@ class OpenRAProcessManager:
 
     def __del__(self):
         """Ensure cleanup on garbage collection."""
-        if self._process is not None and self._process.poll() is None:
-            try:
-                self._process.kill()
-            except Exception:
-                pass
+        self.kill()
+
+
+def _cleanup_all_managers():
+    """Kill all tracked OpenRA processes. Called on interpreter exit."""
+    for mgr in _active_managers:
+        try:
+            if mgr.is_alive():
+                logger.info(f"atexit: killing OpenRA process {mgr.pid}")
+                mgr.kill(timeout=3.0)
+            else:
+                mgr.reap()  # reap zombie if already exited
+        except Exception:
+            pass
+    _active_managers.clear()
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGTERM/SIGINT: kill child processes then re-raise."""
+    sig_name = signal.Signals(signum).name
+    logger.info(f"Received {sig_name}, shutting down OpenRA processes...")
+    _cleanup_all_managers()
+    # Re-raise with default handler so the process actually exits
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+# Register cleanup handlers
+atexit.register(_cleanup_all_managers)
+# Only install signal handlers in main thread
+try:
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+except ValueError:
+    pass  # Not in main thread — atexit still works
