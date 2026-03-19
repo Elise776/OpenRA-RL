@@ -1257,12 +1257,19 @@ async def try_page():
 
 
 def main():
+    import argparse
     import uvicorn
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--openra-path", default=None)  # handled at module level
+    args = parser.parse_args()
 
     uvicorn.run(
         app,
-        host="0.0.0.0",
-        port=8000,
+        host=args.host,
+        port=args.port,
         ws_ping_interval=None,
         ws_ping_timeout=None,
     )
