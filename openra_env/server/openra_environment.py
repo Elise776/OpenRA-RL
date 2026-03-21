@@ -2911,10 +2911,12 @@ class OpenRAEnvironment(MCPEnvironment):
             logger.info(f"Creating session: map={self._config.map_name}")
             self._bridge.connect()
             actual_bot_type = BOT_TYPE_MAP.get(self._config.bot_type, self._config.bot_type)
-            # Use "passive" DummyBot when no AI wanted — player exists (buildings
-            # have an owner) but bot does nothing (no unit production/attacks).
+            # Enemy must join as rl-agent (passive — waits for connection that
+            # never comes) when no bot_type specified. This keeps the player
+            # slot filled so pre-placed buildings spawn, but no AI runs.
+            # Using invalid types leaves the slot empty → no enemy actors.
             if not actual_bot_type:
-                actual_bot_type = "passive"
+                actual_bot_type = "rl-agent"
             bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
             session_id = self._bridge.create_session(
                 map_name=self._config.map_name,
@@ -2923,8 +2925,11 @@ class OpenRAEnvironment(MCPEnvironment):
             )
             logger.info(f"Session created: {session_id}")
 
-            # Wait for session to be ready (game world created and paused)
-            ready = self._bridge.wait_for_ready(max_retries=120, retry_interval=0.5)
+            # Wait for session to be ready (game world created and paused).
+            # With 20+ concurrent sessions, world creation is serialized by
+            # WorldCreateLock (~2-3s per session). Last session can take 60s+.
+            # Use 120s timeout (240 retries * 0.5s) for safety margin.
+            ready = self._bridge.wait_for_ready(max_retries=240, retry_interval=0.5)
         else:
             # Single-session mode: launch a new OpenRA process.
             # Serialized via semaphore to prevent CPU starvation from JIT.

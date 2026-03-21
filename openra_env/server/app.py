@@ -151,6 +151,29 @@ def shutdown_server():
 
 _restart_port_offset = [0]  # mutable counter for port rotation
 
+
+def _cleanup_scenario_maps():
+    """Remove old _scenario_*.oramap files from the maps directory.
+
+    Each RL episode generates a unique scenario map file. These accumulate
+    across waves and slow down the .NET daemon's MapCache.LoadMaps() which
+    must scan every file in the directory. Cleaning up between daemon
+    restarts keeps the scan fast.
+    """
+    from pathlib import Path
+    maps_dir = Path(_openra_path) / "mods" / "ra" / "maps"
+    if not maps_dir.exists():
+        return
+    n_removed = 0
+    for f in maps_dir.glob("_scenario_*.oramap"):
+        try:
+            f.unlink()
+            n_removed += 1
+        except OSError:
+            pass
+    if n_removed > 0:
+        print(f"Cleaned up {n_removed} old scenario maps from {maps_dir}")
+
 @app.post("/restart-daemon")
 def restart_daemon():
     """Kill and restart the .NET daemon on a NEW gRPC port for truly clean state."""
@@ -161,6 +184,13 @@ def restart_daemon():
         _daemon.reap()
         import time as _time
         _time.sleep(2)
+
+        # Clean up old scenario maps to prevent MapCache scan slowdown.
+        # Each episode writes a unique _scenario_*.oramap file. These accumulate
+        # across waves, making LoadMaps() progressively slower (scans ALL files).
+        # With 60+ stock maps + 40+ scenario maps, LoadMaps takes ~2s per call,
+        # and 20 sessions each calling it = 40s — enough to cause timeouts.
+        _cleanup_scenario_maps()
 
         # Use a new gRPC port each restart to avoid any residual state
         _restart_port_offset[0] += 1
