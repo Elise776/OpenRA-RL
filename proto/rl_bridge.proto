@@ -185,7 +185,7 @@ enum ActionType {
   SET_PRIMARY = 19;     // Set primary production building (actor_id = building)
   SURRENDER = 20;       // Surrender / resign — ends the game as a loss
   FAST_ADVANCE = 21;
-  PATROL = 22;          // Patrol between current position and target    // Fast-forward N ticks at CPU speed (no real-time sleeping)
+  PATROL = 22;          // Patrol between current position and target
 }
 
 // ─── State Query ─────────────────────────────────────────────────────────────

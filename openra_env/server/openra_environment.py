@@ -1814,7 +1814,6 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved)
 
         @configurable_tool
-        @configurable_tool
         def patrol_units(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
             """Order units to patrol between current position and target, engaging enemies on the way.
             unit_ids: comma-separated IDs, \"all_combat\", \"all_idle\", \"type:e1\", or a group name."""
