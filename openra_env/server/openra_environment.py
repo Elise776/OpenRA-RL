@@ -313,11 +313,7 @@ class OpenRAEnvironment(MCPEnvironment):
         tools_cfg = self._app_config.tools
 
         def configurable_tool(fn):
-            """Conditionally register *fn* as an MCP tool based on config.
-
-            Sync tool functions are wrapped in asyncio.to_thread() to avoid
-            blocking the event loop when gRPC calls take seconds.
-            """
+            """Conditionally register *fn* as an MCP tool based on config."""
             if not should_register_tool(fn.__name__, tools_cfg):
                 return fn
             if not asyncio.iscoroutinefunction(fn):
@@ -1424,10 +1420,11 @@ class OpenRAEnvironment(MCPEnvironment):
                     "game_over", "enemy_spotted", "unit_destroyed", "under_attack",
                     "building_discovered", "enemy_building_destroyed",
                     "own_building_destroyed",
+                    "unit_arrived", "production_complete",
                 ]
                 proto_obs = env._bridge.fast_advance_unary(
                     ticks,
-                    check_events_every=100,  # 4 seconds; 25 was too frequent at 64 sessions
+                    check_events_every=25,  # 1 second; cached actor refs make this cheap
                     enabled_interrupts=_DEFAULT_INTERRUPTS,
                 )
                 obs_dict = observation_to_dict(proto_obs)
