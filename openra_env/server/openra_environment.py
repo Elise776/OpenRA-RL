@@ -5,6 +5,7 @@ translates between the OpenEnv API and the gRPC bridge protocol,
 computes rewards, and exposes MCP tools for LLM agents.
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -312,10 +313,20 @@ class OpenRAEnvironment(MCPEnvironment):
         tools_cfg = self._app_config.tools
 
         def configurable_tool(fn):
-            """Conditionally register *fn* as an MCP tool based on config."""
-            if should_register_tool(fn.__name__, tools_cfg):
-                return mcp.tool()(fn)
-            return fn
+            """Conditionally register *fn* as an MCP tool based on config.
+
+            Sync tool functions are wrapped in asyncio.to_thread() to avoid
+            blocking the event loop when gRPC calls take seconds.
+            """
+            if not should_register_tool(fn.__name__, tools_cfg):
+                return fn
+            if not asyncio.iscoroutinefunction(fn):
+                import functools
+                @functools.wraps(fn)
+                async def async_wrapper(*args, **kwargs):
+                    return await asyncio.to_thread(fn, *args, **kwargs)
+                return mcp.tool()(async_wrapper)
+            return mcp.tool()(fn)
 
         # ── Read Tools (return from cached observation) ──────────────────
 
@@ -1416,7 +1427,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 ]
                 proto_obs = env._bridge.fast_advance_unary(
                     ticks,
-                    check_events_every=25,
+                    check_events_every=100,  # 4 seconds; 25 was too frequent at 64 sessions
                     enabled_interrupts=_DEFAULT_INTERRUPTS,
                 )
                 obs_dict = observation_to_dict(proto_obs)
