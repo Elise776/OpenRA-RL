@@ -313,7 +313,12 @@ class OpenRAEnvironment(MCPEnvironment):
         tools_cfg = self._app_config.tools
 
         def configurable_tool(fn):
-            """Conditionally register *fn* as an MCP tool based on config."""
+            """Conditionally register *fn* as an MCP tool based on config.
+
+            Sync tools wrapped in asyncio.to_thread to avoid blocking the
+            event loop. gRPC calls can take 1-10s at high game ticks due to
+            pathfinding complexity in the game engine.
+            """
             if not should_register_tool(fn.__name__, tools_cfg):
                 return fn
             if not asyncio.iscoroutinefunction(fn):
@@ -1411,7 +1416,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 enabled_interrupts: Signal names to check, e.g. ["enemy_spotted", "building_discovered"].
                 If an interrupt fires, advance ends early with 'interrupted' and 'interrupt_reason' in result."""
             requested = ticks
-            ticks = max(1, min(ticks, 5000))  # clamp to [1, 5000]
+            ticks = max(1, min(ticks, 50))  # clamp to [1, 50] — keep each gRPC call <2s even at high game ticks
             try:
                 # Server-side interrupt detection: check every 25 ticks.
                 # AllCells LINQ removed from CheckInterrupts(), only runs once

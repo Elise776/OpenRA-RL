@@ -107,27 +107,12 @@ class OpenRAMCPClient:
         await self.close()
 
     async def _send_recv(self, message: dict) -> dict:
-        """Send a message and wait for response.
-
-        Uses asyncio.shield to prevent task cancellation on timeout.
-        Without shield, asyncio.wait_for cancels the recv task, which
-        kills the WebSocket connection and cascades failures.
-        With shield, timeout raises TimeoutError but the recv task
-        continues — the connection stays alive.
-        """
+        """Send a message and wait for response."""
         if self._ws is None:
             raise RuntimeError("Not connected. Call connect() first.")
 
         await self._ws.send(json.dumps(message))
-        try:
-            raw = await asyncio.wait_for(
-                asyncio.shield(self._ws.recv()), timeout=self._timeout
-            )
-        except asyncio.TimeoutError:
-            # Timeout but connection is NOT killed (shield prevents cancellation).
-            # The recv task is still running — next call will get the stale response
-            # (or the connection will error naturally). Raise as regular error.
-            raise TimeoutError(f"MCP recv timeout ({self._timeout}s)") from None
+        raw = await asyncio.wait_for(self._ws.recv(), timeout=self._timeout)
         return json.loads(raw)
 
     # ── Environment Control ───────────────────────────────────────
