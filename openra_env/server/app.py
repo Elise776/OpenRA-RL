@@ -46,14 +46,13 @@ _daemon = OpenRAProcessManager(OpenRAConfig(
     openra_path=_openra_path,
 ))
 
+# Per-session gRPC channels: each BridgeClient creates its own connection.
+# Shared channel caused HTTP/2 flow control head-of-line blocking at 8+
+# concurrent sessions (64KB connection window exhausted by large observations).
+# This lightweight channel is only for health checks and daemon restart probes.
 _shared_channel = grpc.insecure_channel(
     f"localhost:{_base_grpc_port}",
-    options=[
-        ("grpc.max_receive_message_length", 64 * 1024 * 1024),
-        ("grpc.max_send_message_length", 16 * 1024 * 1024),
-        ("grpc.keepalive_time_ms", 10000),
-        ("grpc.keepalive_timeout_ms", 5000),
-    ],
+    options=[("grpc.keepalive_time_ms", 10000), ("grpc.keepalive_timeout_ms", 5000)],
 )
 
 
@@ -61,7 +60,7 @@ def _env_factory():
     return OpenRAEnvironment(
         grpc_port=_base_grpc_port,
         multi_session=True,
-        shared_channel=_shared_channel,
+        shared_channel=None,  # per-session channels
     )
 
 
