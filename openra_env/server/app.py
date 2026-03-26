@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from openenv.core.env_server import create_app
 
 from openra_env.models import OpenRAAction, OpenRAObservation
+from openra_env.server.grpc_worker import start_worker, stop_worker
 from openra_env.server.openra_environment import OpenRAEnvironment
 from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
 
@@ -46,8 +47,10 @@ _daemon = OpenRAProcessManager(OpenRAConfig(
     openra_path=_openra_path,
 ))
 
-# Shared gRPC channel for all sessions (one HTTP/2 connection to dotnet).
-# Per-call latency kept <2s by capping advance ticks to 50.
+# Shared gRPC channel — single TCP connection to the .NET daemon.
+# All tool calls are dispatched to a single gRPC worker thread
+# (see grpc_worker.py) to avoid HTTP/2 contention and event loop blocking.
+
 _shared_channel = grpc.insecure_channel(
     f"localhost:{_base_grpc_port}",
     options=[
@@ -57,6 +60,8 @@ _shared_channel = grpc.insecure_channel(
         ("grpc.keepalive_timeout_ms", 5000),
     ],
 )
+
+# gRPC worker thread started at startup (see @app.on_event("startup") below)
 
 
 def _env_factory():
@@ -102,9 +107,16 @@ app = create_app(
 )
 
 
+@app.on_event("startup")
+def _on_startup():
+    """Start the single gRPC worker thread for all tool call dispatch."""
+    start_worker()
+
+
 @app.on_event("shutdown")
 def _on_shutdown():
-    """Kill the game daemon when uvicorn shuts down (SIGTERM/SIGINT)."""
+    """Kill the game daemon and stop the gRPC worker when uvicorn shuts down."""
+    stop_worker()
     if _daemon.is_alive():
         print(f"Shutting down game daemon (PID {_daemon.pid})...")
         _daemon.kill(timeout=10.0)
