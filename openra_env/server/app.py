@@ -155,6 +155,48 @@ def shutdown_server():
     threading.Thread(target=_do_shutdown, daemon=True).start()
     return {"status": "shutting_down", "daemon_pid": _daemon.pid}
 
+
+@app.post("/clear-sessions")
+async def clear_sessions():
+    """Force-clear all tracked sessions.
+
+    Use after a training crash to free capacity without restarting the server.
+    Destroys each session's .NET game via gRPC (best-effort), then removes
+    the session from the OpenEnv tracking dict so new connections can proceed.
+    """
+    server = app.state.env_server
+    # Snapshot session IDs under lock
+    async with server._session_lock:
+        session_ids = list(server._sessions.keys())
+
+    destroyed = 0
+    failed = 0
+    for sid in session_ids:
+        try:
+            await server._destroy_session(sid)
+            destroyed += 1
+        except Exception as e:
+            failed += 1
+            print(f"Failed to destroy session {sid}: {e}")
+
+    # Force-clear any remaining entries (in case _destroy_session missed some)
+    force_cleared = 0
+    async with server._session_lock:
+        force_cleared = len(server._sessions)
+        if force_cleared > 0:
+            server._sessions.clear()
+            server._session_executors.clear()
+            server._session_info.clear()
+
+    return {
+        "cleared": destroyed,
+        "failed": failed,
+        "force_cleared": force_cleared,
+        "active_sessions": len(server._sessions),
+        "max_sessions": _max_concurrent,
+    }
+
+
 _restart_port_offset = [0]  # mutable counter for port rotation
 
 

@@ -3116,6 +3116,36 @@ class OpenRAEnvironment(MCPEnvironment):
             reward_vector=reward_vec,
         )
 
+    def _destroy_session_with_timeout(self, timeout_s: float = 15.0) -> None:
+        """Destroy the .NET game session with a hard timeout.
+
+        Runs bridge.destroy_session() in a daemon thread so that if the gRPC
+        call hangs (unresponsive .NET daemon, network issue), we don't block
+        the caller indefinitely.  The daemon thread is abandoned after timeout
+        (shutdown(wait=False)) — the session reaper or /clear-sessions can
+        clean it up later.
+        """
+        import concurrent.futures
+
+        sid = self._bridge.session_id
+        if not sid:
+            return
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(self._bridge.destroy_session)
+        try:
+            future.result(timeout=timeout_s)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "destroy_session(%s) timed out after %.0fs — session may leak on .NET side",
+                sid, timeout_s,
+            )
+        except Exception as e:
+            logger.warning("destroy_session(%s) failed: %s", sid, e)
+        finally:
+            # Don't wait for the thread — it may be stuck in a gRPC call
+            pool.shutdown(wait=False)
+
     def close(self) -> None:
         """Clean up resources.
 
@@ -3123,10 +3153,13 @@ class OpenRAEnvironment(MCPEnvironment):
         via gRPC before closing the bridge channel.  Without this,
         sessions leak in the daemon and it becomes unresponsive after
         ~40-60 leaked sessions.
+
+        Uses a thread-level timeout to prevent hangs when the .NET daemon
+        is unresponsive (e.g., stuck in pathfinding or GC pause).
         """
         if self._multi_session:
             try:
-                self._bridge.destroy_session()
+                self._destroy_session_with_timeout(timeout_s=15.0)
             except Exception as e:
                 logger.warning("Failed to destroy session on close: %s", e)
             # Close the bridge channel unless it's a shared channel
