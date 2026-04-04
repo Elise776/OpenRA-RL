@@ -110,10 +110,62 @@ app.routes[:] = [r for r in app.routes if not (hasattr(r, "path") and r.path in 
 
 
 
+@app.get("/session-count")
+def session_count():
+    """Return current session count (fast, no side effects)."""
+    server = app.state.env_server
+    return {
+        "active_sessions": len(server._sessions),
+        "max_sessions": _max_concurrent,
+    }
+
+
+# ── Session reaper: catches leaked sessions the normal cleanup path missed ──
+_SESSION_MAX_AGE_S = float(os.getenv("SESSION_MAX_AGE_S", "300"))  # 5 min default
+
+
+async def _session_reaper():
+    """Background task that destroys sessions older than SESSION_MAX_AGE_S.
+
+    Runs every 30s. Catches sessions leaked by:
+    - WebSocket disconnects where env.close() timed out
+    - Crashed episodes that never called close()
+    - Training restarts that left server-side sessions orphaned
+    """
+    server = app.state.env_server
+    while True:
+        await asyncio.sleep(30)
+        try:
+            now = time.time()
+            stale_ids = []
+            async with server._session_lock:
+                for sid, info in server._session_info.items():
+                    age = now - info.last_activity_at
+                    if age > _SESSION_MAX_AGE_S:
+                        stale_ids.append((sid, age))
+
+            if stale_ids:
+                print(f"Session reaper: {len(stale_ids)} stale sessions "
+                      f"(>{_SESSION_MAX_AGE_S:.0f}s old), destroying...")
+                for sid, age in stale_ids:
+                    try:
+                        await server._destroy_session(sid)
+                        print(f"  Reaped session {sid[:8]}... (age={age:.0f}s)")
+                    except Exception as e:
+                        print(f"  Failed to reap {sid[:8]}...: {e}")
+                # Force-clear any that _destroy_session couldn't handle
+                async with server._session_lock:
+                    remaining = len(server._sessions)
+                    if remaining > 0:
+                        print(f"  {remaining} sessions remain after reap")
+        except Exception as e:
+            print(f"Session reaper error: {e}")
+
+
 @app.on_event("startup")
-def _on_startup():
-    """Startup hook (grpc_worker removed — per-session channels)."""
-    pass
+async def _on_startup():
+    """Start background session reaper."""
+    asyncio.create_task(_session_reaper())
 
 
 @app.on_event("shutdown")
@@ -147,12 +199,16 @@ def health_check():
             _ch.close()
         except Exception:
             pass
+    server = app.state.env_server
+    n_sessions = len(server._sessions)
     return {
         "status": "healthy" if (alive and grpc_ok) else "degraded",
         "daemon_pid": _daemon.pid,
         "daemon_alive": alive,
         "grpc_ok": grpc_ok,
         "grpc_port": _base_grpc_port,
+        "active_sessions": n_sessions,
+        "max_sessions": _max_concurrent,
     }
 
 
@@ -199,7 +255,10 @@ async def clear_sessions():
             server._sessions.clear()
             server._session_executors.clear()
             server._session_info.clear()
-            server._session_stacks.clear()
+            # Clear optional tracking dicts (may not exist in all OpenEnv versions)
+            for _attr in ("_session_stacks",):
+                if hasattr(server, _attr):
+                    getattr(server, _attr).clear()
 
     return {
         "cleared": destroyed,

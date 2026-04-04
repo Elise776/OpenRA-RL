@@ -3023,15 +3023,30 @@ class OpenRAEnvironment(MCPEnvironment):
         **kwargs: Any,
     ) -> OpenRAObservation:
         """Reset the environment for a new episode."""
-        # Clean up previous episode's .NET session (prevents session leak)
+        # Clean up previous episode's .NET session (prevents session leak).
+        # Use _destroy_session_with_timeout to avoid blocking if the .NET
+        # daemon is slow (busy with concurrent sessions, pathfinding, etc.).
+        # A bare destroy_session() with no timeout was the main leak source.
         if self._multi_session:
             try:
-                self._bridge.destroy_session()
+                self._destroy_session_with_timeout(timeout_s=10.0)
             except Exception as e:
                 logger.warning("Failed to destroy previous session during reset: %s", e)
+            # Close and re-create bridge channel for a clean slate.
+            # If destroy_session failed, the channel may be in a bad state
+            # (half-closed, deadline exceeded, etc.). A fresh channel ensures
+            # create_session won't inherit stale connection state.
+            if self._shared_channel is None:
+                try:
+                    self._bridge.close()
+                except Exception:
+                    pass
         else:
             self._bridge.close()
             self._process.kill()
+
+        # Mark as open (close() guard)
+        self._closed = False
 
         # Initialize new episode state
         ep_id = episode_id or str(uuid.uuid4())
@@ -3249,7 +3264,13 @@ class OpenRAEnvironment(MCPEnvironment):
 
         Uses a thread-level timeout to prevent hangs when the .NET daemon
         is unresponsive (e.g., stuck in pathfinding or GC pause).
+
+        Idempotent: safe to call multiple times (guarded by _closed flag).
         """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+
         if self._multi_session:
             try:
                 self._destroy_session_with_timeout(timeout_s=15.0)
