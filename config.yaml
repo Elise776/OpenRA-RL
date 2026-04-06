@@ -106,7 +106,7 @@ opponent:
 #   compression_trigger: 0            # Compress at this count (0 = keep_last * 2)
 #   max_retries: 4                    # Retry on transient errors
 #   retry_backoff_s: 10               # Base backoff (multiplied by attempt)
-#   request_timeout_s: 120.0          # HTTP timeout per request
+#   request_timeout_s: 600.0          # HTTP timeout per request
 #   extra_headers:                    # Custom headers (OpenRouter-specific)
 #     HTTP-Referer: "https://github.com/openra-rl"
 #     X-Title: "OpenRA-RL Agent"

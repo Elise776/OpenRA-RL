@@ -21,6 +21,9 @@ from openra_env.mcp_ws_client import OpenRAMCPClient
 
 logger = logging.getLogger("llm_agent")
 
+#Personality tokens
+STYLE_TOKEN = "rush"
+
 
 def _looks_like_tool_capability_error(error_text: str) -> bool:
     """Best-effort detection of provider errors indicating no tool support."""
@@ -764,6 +767,25 @@ async def run_agent(config, verbose: bool = False):
             )
             if memory_context:
                 system_prompt += f"\n\n## 历史对局经验\n{memory_context}"
+                system_prompt += f"""
+
+                ## Role Override: Hybrid RTS Strategist
+                You are the high-level strategist for an OpenRA RTS bot.
+
+                Style: {STYLE_TOKEN}
+
+                Your main job is:
+                - choose high-level strategy
+                - choose scouting priorities
+                - choose aggression vs defense posture
+                - choose economy/tech priorities
+                - infer likely enemy plan from partial information
+
+                You are NOT a click-by-click controller.
+                Use tools to act in the environment, but keep decisions strategic and stable.
+                Prefer 20-30 second plans over constant plan changes.
+                Avoid thrashing.
+                """
                 print(f"Loaded {memory.episode_count} episodes from memory (win rate: {memory.win_rate:.0%})")
             elif memory.episode_count > 0:
                 print(f"Memory: {memory.episode_count} episodes loaded")
@@ -801,6 +823,20 @@ async def run_agent(config, verbose: bool = False):
                     opponent_summary=opponent_summary,
                     planning_nudge=prompts.planning_nudge,
                 )
+                planning_prompt += f"""
+
+                STYLE: {STYLE_TOKEN}
+
+                During planning, behave as a macro-commander.
+                Focus on:
+                - opening phase
+                - first scouting goal
+                - first military timing
+                - economy vs aggression balance
+                - likely enemy style
+
+                Your output should still use tools when needed, but your reasoning should stay high-level.
+                """
                 _append_traced_message(
                     messages,
                     trace_messages,
@@ -959,7 +995,19 @@ async def run_agent(config, verbose: bool = False):
                     briefing=briefing,
                     barracks_type=barracks_type,
                     mcv_note=mcv_note,
-                ),
+                ) + f"""
+
+                STYLE: {STYLE_TOKEN}
+
+                From this point on, play according to this style while adapting to the opponent.
+                Stay strategic:
+                - rush = earlier pressure, lower greed
+                - turtle = safer defense, slower push
+                - harassment = pick off weak targets and disrupt economy
+                - econ_boom = prioritize growth and expansion
+
+                Use tools to act, but let style guide your choices.
+                """,
             },
         )
 
@@ -1032,9 +1080,22 @@ async def run_agent(config, verbose: bool = False):
                         _timeline = event_tracker.format_timeline() if event_tracker else ""
                         _checkpoint_msg = (
                             f"STRATEGY CHECKPOINT (t={_cur_tick}, ~{_cur_tick // 25}s)\n"
+                            f"Style: {STYLE_TOKEN}\n"
                             f"K/D value ratio: {_kd:.2f} | "
                             f"Army: ${_mil.get('army_value', 0)} | "
                             f"Cash: ${_eco.get('cash', 0)}\n"
+                        )
+                        if _timeline:
+                            _checkpoint_msg += f"{_timeline}\n"
+                        _checkpoint_msg += (
+                            "Re-evaluate the current strategic plan.\n"
+                            "Decide whether to keep or adjust:\n"
+                            "- current phase\n"
+                            "- macro priority\n"
+                            "- scout priority\n"
+                            "- aggression level\n"
+                            "- likely enemy plan\n"
+                            "Stay high-level and then continue acting through tools."
                         )
                         if _timeline:
                             _checkpoint_msg += f"{_timeline}\n"
