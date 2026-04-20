@@ -172,6 +172,41 @@ class BridgeClient:
         if sid == self.session_id:
             self.session_id = ""
 
+    def get_frame(self, max_width: int = 0, format: str = "png", timeout_s: float = 30.0) -> dict:
+        """Capture a real rendered frame from the OpenRA client as PNG bytes.
+
+        Only meaningful when the game is running non-headless (Game.Platform=Default).
+        When the game is headless the server returns an empty image with
+        headless=True; this wrapper normalizes that to a dict you can inspect.
+
+        Returns:
+            {
+              "image": bytes,   # raw PNG
+              "width": int,
+              "height": int,
+              "format": str,
+              "tick": int,
+              "headless": bool, # True when no rendered frame is available
+            }
+        """
+        if not self._connected or self._stub is None:
+            self.connect()
+
+        request = rl_bridge_pb2.GetFrameRequest(
+            session_id=self.session_id,
+            max_width=int(max_width),
+            format=format,
+        )
+        resp = self._stub.GetFrame(request, timeout=timeout_s)
+        return {
+            "image": bytes(resp.image),
+            "width": int(resp.width),
+            "height": int(resp.height),
+            "format": resp.format or format,
+            "tick": int(resp.tick),
+            "headless": bool(resp.headless),
+        }
+
     def close(self) -> None:
         """Close the gRPC channel."""
         # Don't close shared channels — they're managed by the caller

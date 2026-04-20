@@ -1,5 +1,6 @@
 """Subcommand implementations for the openra-rl CLI."""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,7 @@ def cmd_play(
     port: int = 8000,
     server_url: Optional[str] = None,
     local: bool = False,
+    visible: bool = False,
     image_version: Optional[str] = None,
 ) -> None:
     """Run the LLM agent against the game server."""
@@ -94,10 +96,22 @@ def cmd_play(
     if local:
         # Run the server locally (for developers with local OpenRA build)
         header("Starting local server...")
+
+        # Propagate visible-mode override to the spawned server process.
+        # The server reads OPENRA_HEADLESS + game.headless from config.yaml;
+        # --visible just forces it to false for this invocation.
+        _server_env = os.environ.copy()
+        if visible:
+            _server_env["OPENRA_HEADLESS"] = "false"
+            info("Requested visible mode: OpenRA will launch with Game.Platform=Default.")
+        else:
+            info("Running in headless mode (no window). Pass --visible to see the game.")
+
         local_server_proc = subprocess.Popen(
             [sys.executable, "-m", "openra_env.server.app"],
             stdout=sys.stdout,
             stderr=sys.stderr,
+            env=_server_env,
         )
         we_started_server = True
         # Wait for it to be ready

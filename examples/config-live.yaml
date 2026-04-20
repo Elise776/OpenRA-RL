@@ -1,0 +1,48 @@
+# Live visible-mode example config.
+# Launches OpenRA with a real rendered window you can watch while the agent plays.
+# Requires a working GPU/desktop (or Xvfb+GLX in Docker).
+#
+# Usage (from repo root):
+#   python -m openra_env.cli.main run --config examples/config-live.yaml
+#
+# Or set env: OPENRA_RL_CONFIG=examples/config-live.yaml
+
+game:
+  # Path to your OpenRA checkout / installation. Override for your machine.
+  openra_path: "./OpenRA"
+  mod: "ra"
+  map_name: "singles.oramap"
+  grpc_port: 9999
+
+  # The key toggle: visible window instead of Null renderer.
+  headless: false
+
+  # Window the agent game will render into. The host auto-spectates when
+  # Launch.Bots is set (see OpenRA.Game/Game.cs LoadMap), so you'll watch
+  # the rl-agent vs the enemy bot without needing to own a slot.
+  window_width: 1280
+  window_height: 960
+  window_mode: "Windowed"
+  vsync: false
+
+  record_replays: true
+
+opponent:
+  bot_type: "beginner"
+  ai_slot: "Multi0"
+
+# Optional vision wiring for the agent. Leave vision.enabled=false to run
+# text-only but still watch live.
+llm:
+  # Point this at a vision-capable provider/model if you want VLM input.
+  # Any OpenAI-compatible Chat Completions endpoint with image_url support
+  # (OpenRouter multimodal routes, Ollama llava/qwen2-vl, etc.) works.
+  base_url: "https://openrouter.ai/api/v1/chat/completions"
+  # api_key: ""                    # Set via env: OPENROUTER_API_KEY
+  # model: "qwen/qwen2.5-vl-72b-instruct"   # example vision-capable model
+  vision:
+    enabled: false                 # Flip to true to attach live frames
+    every_n_turns: 1
+    max_width: 512
+    format: "png"                  # png | jpeg
+    detail: "low"                  # OpenAI-style detail hint

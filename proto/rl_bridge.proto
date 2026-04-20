@@ -22,6 +22,11 @@ service RLBridge {
   // Session management (multi-session mode)
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
+
+  // Unary: capture the current rendered frame as a PNG byte array.
+  // Requires the game to be running with a real renderer
+  // (i.e. NOT Game.Platform=Null). Returns empty image when headless.
+  rpc GetFrame(GetFrameRequest) returns (GetFrameResponse);
 }
 
 // ─── Observations (Game → Agent) ────────────────────────────────────────────
@@ -240,3 +245,20 @@ message DestroySessionRequest {
 }
 
 message DestroySessionResponse {}
+
+// ─── Frame Capture ──────────────────────────────────────────────────────────
+
+message GetFrameRequest {
+  string session_id = 1;   // Reserved for future per-session routing (ignored today).
+  int32 max_width = 2;     // Downsample to this width (keeps aspect ratio). 0 = full res.
+  string format = 3;       // "png" (default) — reserved for future "jpeg".
+}
+
+message GetFrameResponse {
+  bytes image = 1;         // PNG byte array (empty when headless/no renderer).
+  int32 width = 2;         // Width after optional downsample.
+  int32 height = 3;        // Height after optional downsample.
+  string format = 4;       // "png"
+  int32 tick = 5;          // World tick when frame was captured.
+  bool headless = 6;       // True when the game is headless and no frame is available.
+}

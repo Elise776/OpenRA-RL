@@ -57,6 +57,13 @@ class OpenRAConfig:
     headless: bool = True  # Use Null renderer (no GPU needed)
     record_replays: bool = False  # Enable .orarep replay recording
     multi_session: bool = False  # Multi-session daemon mode
+
+    # Live-view graphics settings (ignored when headless=True)
+    window_width: int = 1280
+    window_height: int = 960
+    window_mode: str = "Windowed"
+    vsync: bool = False
+
     extra_args: dict = field(default_factory=dict)
 
 
@@ -85,6 +92,22 @@ class OpenRAProcessManager:
             self.kill()
 
         cmd = self._build_command()
+        # Loud, unconditional print so users running `play --local` can see
+        # exactly what we're asking OpenRA to do. `logger.info` gets swallowed
+        # by default log levels during interactive sessions.
+        _platform = "Null" if self.config.headless else "Default"
+        print("[openra-rl/launch] ──────────────────────────────────────────")
+        print(f"[openra-rl/launch] headless        = {self.config.headless}")
+        print(f"[openra-rl/launch] Game.Platform   = {_platform}")
+        print(f"[openra-rl/launch] openra_path     = {self.config.openra_path}")
+        print(f"[openra-rl/launch] multi_session   = {self.config.multi_session}")
+        if not self.config.headless:
+            print(f"[openra-rl/launch] window          = "
+                  f"{self.config.window_width}x{self.config.window_height} "
+                  f"{self.config.window_mode} vsync={self.config.vsync}")
+        print("[openra-rl/launch] full command:")
+        print(f"[openra-rl/launch]   {' '.join(cmd)}")
+        print("[openra-rl/launch] ──────────────────────────────────────────")
         logger.info(f"Launching OpenRA: {' '.join(cmd)}")
 
         env = os.environ.copy()
@@ -159,9 +182,21 @@ class OpenRAProcessManager:
                 f"Launch.Bots={bots}",
             ])
 
-        # Use Null renderer for headless operation (no GPU/OpenGL needed)
+        # Use Null renderer for headless operation (no GPU/OpenGL needed).
+        # When headless=False we leave Game.Platform at its default (SDL2), pass
+        # windowed graphics options so a real window opens, and rely on the
+        # built-in "host auto-spectates when Launch.Bots is set" behavior
+        # (see OpenRA/OpenRA.Game/Game.cs LoadMap()) so the window shows the
+        # match without a human slot.
         if self.config.headless:
             args.append("Game.Platform=Null")
+        else:
+            args.extend([
+                "Game.Platform=Default",
+                f"Graphics.Mode={self.config.window_mode}",
+                f"Graphics.WindowedSize={self.config.window_width},{self.config.window_height}",
+                f"Graphics.VSync={'True' if self.config.vsync else 'False'}",
+            ])
 
         if self.config.record_replays:
             args.append("Server.RecordReplays=True")

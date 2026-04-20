@@ -26,8 +26,16 @@ from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
 
 # Multi-session mode: single .NET daemon process handles all games.
 # Eliminates per-game JIT contention and startup timeouts.
-# Legacy single-session mode (one process per game) removed.
-_multi_session = True
+#
+# IMPORTANT: multi-session mode blocks the OpenRA main thread on a gRPC
+# Thread.Join (see BlankLoadScreen.cs — the "Waiting for CreateSession"
+# branch calls grpcThread.Join() on the main thread). In headless mode
+# that's fine (no render loop). In visible mode the main thread is
+# where Game.Loop() drives the renderer, so joining it freezes the
+# window. Therefore when headless=False we switch to single-session
+# mode: no daemon, no Launch.MultiSession flag, each env instance
+# launches its own OpenRA process with Launch.Map + Launch.Bots and
+# runs the normal game loop.
 _base_grpc_port = int(os.getenv("GRPC_BASE_PORT", "9999"))
 _max_concurrent = int(os.getenv("MAX_CONCURRENT_GAMES", "64"))
 
@@ -41,12 +49,72 @@ for _i, _arg in enumerate(_sys.argv):
         os.environ["OPENRA_PATH"] = _openra_path
         break
 
-# Single daemon process, shared gRPC channel.
-_daemon = OpenRAProcessManager(OpenRAConfig(
+# Load the full OpenRARLConfig so the daemon honors game.* settings from
+# config.yaml / environment variables (headless, window size, mod, etc.).
+# Without this, the daemon would always launch with the built-in defaults
+# (headless=True → Game.Platform=Null), even when config.yaml says otherwise.
+from openra_env.config import load_config as _load_config  # noqa: E402
+_app_config = _load_config()
+_game_cfg = _app_config.game
+
+# CLI/env-supplied openra_path takes precedence over the config-file value,
+# since existing deployments rely on that override.
+if _openra_path and _openra_path != "/opt/openra":
+    _game_cfg_openra_path = _openra_path
+else:
+    _game_cfg_openra_path = _game_cfg.openra_path or _openra_path
+
+# Boolean override for quick tests: OPENRA_HEADLESS=false
+_headless_env = os.environ.get("OPENRA_HEADLESS")
+if _headless_env is not None:
+    _headless = _headless_env.strip().lower() in ("true", "1", "yes")
+else:
+    _headless = bool(_game_cfg.headless)
+
+# Multi-session only works in headless mode. See app.py comment block above
+# and BlankLoadScreen.cs: the Launch.MultiSession path joins a gRPC thread on
+# OpenRA's main thread, which is where SDL2 Game.Loop() drives the renderer
+# in visible mode. Visible mode therefore uses single-session: each env
+# instance spawns its own OpenRA process with Launch.Map + Launch.Bots.
+_multi_session = _headless
+
+_daemon_config = OpenRAConfig(
     grpc_port=_base_grpc_port,
-    multi_session=True,
-    openra_path=_openra_path,
-))
+    multi_session=_multi_session,
+    openra_path=_game_cfg_openra_path,
+    mod=_game_cfg.mod,
+    headless=_headless,
+    record_replays=bool(_game_cfg.record_replays),
+    window_width=int(getattr(_game_cfg, "window_width", 1280)),
+    window_height=int(getattr(_game_cfg, "window_height", 960)),
+    window_mode=str(getattr(_game_cfg, "window_mode", "Windowed")),
+    vsync=bool(getattr(_game_cfg, "vsync", False)),
+)
+
+_expected_platform = "Null" if _daemon_config.headless else "Default"
+print("[openra-rl/server] daemon config:")
+print(f"  openra_path     = {_daemon_config.openra_path}")
+print(f"  mod             = {_daemon_config.mod}")
+print(f"  grpc_port       = {_daemon_config.grpc_port}")
+print(f"  multi_session   = {_daemon_config.multi_session}")
+print(f"  headless        = {_daemon_config.headless}")
+print(f"  expected platform = Game.Platform={_expected_platform}")
+if not _daemon_config.headless:
+    print(f"  window          = {_daemon_config.window_width}x{_daemon_config.window_height} "
+          f"({_daemon_config.window_mode}, vsync={_daemon_config.vsync})")
+if not _multi_session:
+    print("[openra-rl/server] single-session visible mode — daemon will NOT be "
+          "launched; each env instance spawns its own OpenRA process on reset.")
+
+# Make the resolved openra_path / headless flag visible to child env instances.
+# OpenRAEnvironment.__init__ calls load_config(), which reads OPENRA_PATH and
+# OPENRA_HEADLESS from the environment. Set them here so per-session
+# processes inherit the same config the server computed.
+os.environ["OPENRA_PATH"] = _daemon_config.openra_path
+os.environ["OPENRA_HEADLESS"] = "true" if _headless else "false"
+
+# Single daemon process, shared gRPC channel (only used in multi-session mode).
+_daemon = OpenRAProcessManager(_daemon_config)
 
 # Per-session gRPC channels: each environment creates its own channel.
 # No shared channel needed — eliminates HTTP/2 contention and grpc_worker bottleneck.
@@ -55,7 +123,7 @@ _daemon = OpenRAProcessManager(OpenRAConfig(
 def _env_factory():
     return OpenRAEnvironment(
         grpc_port=_base_grpc_port,
-        multi_session=True,
+        multi_session=_multi_session,
     )
 
 
@@ -77,11 +145,14 @@ def _check_port_free(port: int) -> None:
             # TIME_WAIT only — safe to proceed
             print(f"Port {port} in TIME_WAIT, proceeding with SO_REUSEADDR")
 
-if not _daemon.is_alive():
-    _daemon.reap()  # clean up zombie from previous run if any
-    _check_port_free(_base_grpc_port)
-    _daemon.launch()
-    print(f"Game daemon launched on port {_base_grpc_port}")
+if _multi_session:
+    if not _daemon.is_alive():
+        _daemon.reap()  # clean up zombie from previous run if any
+        _check_port_free(_base_grpc_port)
+        _daemon.launch()
+        print(f"Game daemon launched on port {_base_grpc_port}")
+else:
+    print("[openra-rl/server] skipping daemon launch (single-session visible mode).")
 
 
 app = create_app(
@@ -101,7 +172,9 @@ def _on_startup():
 
 @app.on_event("shutdown")
 def _on_shutdown():
-    """Kill the game daemon when uvicorn shuts down."""
+    """Kill the game daemon when uvicorn shuts down (multi-session mode only)."""
+    if not _multi_session:
+        return
     if _daemon.is_alive():
         print(f"Shutting down game daemon (PID {_daemon.pid})...")
         _daemon.kill(timeout=10.0)
@@ -112,6 +185,15 @@ def _on_shutdown():
 @app.get("/health")
 def health_check():
     """Health check endpoint. Auto-restarts daemon if dead, verifies gRPC."""
+    if not _multi_session:
+        return {
+            "status": "healthy",
+            "mode": "single_session",
+            "daemon_pid": None,
+            "daemon_alive": False,
+            "grpc_ok": None,
+            "grpc_port": _base_grpc_port,
+        }
     alive = _daemon.is_alive()
     if not alive:
         _daemon.reap()
@@ -145,10 +227,11 @@ def shutdown_server():
     import threading
     def _do_shutdown():
         time.sleep(0.5)  # let response flush
-        _daemon.kill(timeout=10.0)
+        if _multi_session:
+            _daemon.kill(timeout=10.0)
         os._exit(0)
     threading.Thread(target=_do_shutdown, daemon=True).start()
-    return {"status": "shutting_down", "daemon_pid": _daemon.pid}
+    return {"status": "shutting_down", "daemon_pid": _daemon.pid if _multi_session else None}
 
 _restart_port_offset = [0]  # mutable counter for port rotation
 
@@ -179,6 +262,8 @@ def _cleanup_scenario_maps():
 def restart_daemon():
     """Kill and restart the .NET daemon on a NEW gRPC port for truly clean state."""
     global _base_grpc_port
+    if not _multi_session:
+        return {"status": "skipped", "reason": "single-session mode has no daemon"}
     try:
         if _daemon.is_alive():
             _daemon.kill(timeout=10.0)

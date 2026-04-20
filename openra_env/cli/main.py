@@ -33,6 +33,11 @@ def main() -> None:
     play_parser.add_argument("--port", type=int, default=8000, help="Game server port (default: 8000)")
     play_parser.add_argument("--server-url", help="Connect to existing server URL (skip Docker)")
     play_parser.add_argument("--local", action="store_true", help="Run server locally instead of Docker (for developers)")
+    play_parser.add_argument(
+        "--visible", action="store_true",
+        help="Launch OpenRA non-headless (SDL2 window) so you can watch the match. "
+             "Equivalent to OPENRA_HEADLESS=false for the spawned local server.",
+    )
     play_parser.add_argument("--version", dest="image_version", default=None, help="Docker image version to use (default: latest)")
 
     # ── config ──────────────────────────────────────────────────────
@@ -172,6 +177,7 @@ def main() -> None:
             port=args.port,
             server_url=args.server_url,
             local=args.local,
+            visible=args.visible,
             image_version=args.image_version,
         )
     elif args.command == "config":

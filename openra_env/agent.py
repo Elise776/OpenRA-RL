@@ -279,7 +279,191 @@ def compose_pregame_briefing(state: dict) -> str:
         "Available buildings:",
         *bldg_lines,
     ]
+    # Append the same actionable-state block the per-turn briefing uses, so
+    # turn 1 already tells the model "deploy MCV first" etc. without depending
+    # on vision.
+    actionable = format_actionable_state(state)
+    if actionable:
+        parts.extend(["", actionable])
     return "\n".join(parts)
+
+
+# Building role buckets used by the actionable-state summary. Keeps the
+# briefing concise and lets the agent see "do I already have a power plant /
+# refinery / barracks?" without having to infer it from raw types.
+_ROLE_FACT = {"fact"}
+_ROLE_POWER = {"powr", "apwr"}                      # advanced powr = apwr
+_ROLE_REFINERY = {"proc"}
+_ROLE_BARRACKS = {"barr", "tent"}                   # soviet barr / allied tent
+_ROLE_WAR_FACTORY = {"weap"}
+_ROLE_RADAR = {"dome"}
+_ROLE_REPAIR = {"fix"}
+_ROLE_TECH = {"stek", "atek"}
+# Recommended early-game legal sequence. Each entry is (label, is_satisfied_fn,
+# next_action_hint). Evaluated in order; first unsatisfied step is surfaced.
+def _recommend_next_actions(
+    faction: str,
+    owned_types: set[str],
+    has_undeployed_mcv: bool,
+    available_production: list[str],
+    production_items: list[str],
+    harvesters: int,
+    funds: int,
+    power_balance: int,
+) -> list[str]:
+    recs: list[str] = []
+    # MCV first — nothing else is legal until the construction yard is down.
+    if has_undeployed_mcv and not (_ROLE_FACT & owned_types):
+        recs.append("deploy_unit(<mcv id>) — no Construction Yard yet")
+        return recs
+    if not (_ROLE_FACT & owned_types):
+        recs.append("BLOCKED: no Construction Yard and no undeployed MCV. Survey units_summary for an MCV.")
+        return recs
+    # Power — anything you build without power stalls, so this is top priority.
+    powr = "powr" if "powr" in available_production else ("apwr" if "apwr" in available_production else "")
+    if not (_ROLE_POWER & owned_types) and powr:
+        recs.append(f"build_and_place(building_type='{powr}') — first power plant")
+    elif power_balance < 0 and powr:
+        recs.append(f"build_and_place(building_type='{powr}') — power balance {power_balance:+d}")
+    # Refinery (economy). Required before infantry is useful.
+    if not (_ROLE_REFINERY & owned_types) and "proc" in available_production:
+        recs.append("build_and_place(building_type='proc') — first refinery (brings a harvester)")
+    elif (_ROLE_REFINERY & owned_types) and harvesters < 2 and "harv" in available_production:
+        recs.append("build_unit(unit_type='harv') — expand economy")
+    # Production — barracks before anything combat, war factory for vehicles.
+    barr = "tent" if "tent" in available_production else ("barr" if "barr" in available_production else "")
+    if (_ROLE_REFINERY & owned_types) and not (_ROLE_BARRACKS & owned_types) and barr:
+        recs.append(f"build_and_place(building_type='{barr}') — required for infantry")
+    if (_ROLE_BARRACKS & owned_types) and "e1" in available_production and funds >= 100:
+        recs.append("build_unit(unit_type='e1', count=3) — first rifle squad")
+    if (_ROLE_BARRACKS & owned_types) and not (_ROLE_WAR_FACTORY & owned_types) and "weap" in available_production:
+        recs.append("build_and_place(building_type='weap') — unlocks vehicles")
+    # If nothing else is obvious and a placement is ready, remind the model.
+    ready = [p for p in production_items if "@100%" in p]
+    if ready:
+        recs.append(f"advance(ticks=100) or place_building for ready: {', '.join(p.split('@')[0] for p in ready)}")
+    return recs
+
+
+def format_actionable_state(state: dict) -> str:
+    """Return an ACTIONABLE STATE block telling the model what IS and IS NOT
+    currently legal. Driven purely by get_game_state — does not rely on vision.
+    """
+    if not isinstance(state, dict) or "tick" not in state:
+        return ""
+    eco = state.get("economy", {})
+    cash = eco.get("cash", 0)
+    ore = eco.get("ore", 0)
+    funds = cash + ore
+    harvesters = eco.get("harvester_count", 0)
+    power_balance = state.get("power_balance", 0)
+    buildings = state.get("buildings_summary", []) or []
+    units = state.get("units_summary", []) or []
+    owned_types = {b.get("type", "") for b in buildings}
+    available = state.get("available_production", []) or []
+    production_items = state.get("production_items", []) or []
+    faction = state.get("faction", "") or ""
+
+    # MCV/ConYard status — the single most important early-game gate.
+    mcv_units = [u for u in units if u.get("type") == "mcv"]
+    has_mcv_undeployed = len(mcv_units) > 0
+    mcv_ids = [u.get("id") for u in mcv_units]
+    has_fact = bool(_ROLE_FACT & owned_types)
+
+    # Partition available into buildings vs units so the model can see both
+    # lists clearly. All building internal names are 3-5 lowercase letters so
+    # we use the owned_types set heuristic plus the known role sets.
+    _BUILDING_HINTS = (_ROLE_POWER | _ROLE_REFINERY | _ROLE_BARRACKS
+                       | _ROLE_WAR_FACTORY | _ROLE_RADAR | _ROLE_REPAIR
+                       | _ROLE_TECH | _ROLE_FACT
+                       | {"gun", "ftur", "tsla", "sam", "agun", "pbox", "hbox",
+                          "hpad", "afld", "syrd", "spen", "silo", "iron",
+                          "pdox", "mslo", "atek", "stek", "dome", "fix"})
+    avail_buildings = sorted(x for x in available if x in _BUILDING_HINTS)
+    avail_units = sorted(x for x in available if x not in _BUILDING_HINTS)
+
+    idle_unit_ids = [u.get("id") for u in units
+                     if u.get("idle") and u.get("can_attack")]
+
+    lines = ["=== ACTIONABLE STATE ==="]
+    if has_fact:
+        lines.append("Construction Yard: DEPLOYED — building actions are legal.")
+    elif has_mcv_undeployed:
+        lines.append(
+            f"Construction Yard: NOT DEPLOYED. MCV ids={mcv_ids}. "
+            "Action: deploy_unit(unit_id=<MCV id>) before anything else."
+        )
+    else:
+        lines.append("Construction Yard: MISSING and NO MCV visible — check units_summary.")
+
+    role_status = []
+    role_status.append(f"power_plant={'yes' if _ROLE_POWER & owned_types else 'no'}")
+    role_status.append(f"refinery={'yes' if _ROLE_REFINERY & owned_types else 'no'}")
+    role_status.append(f"barracks={'yes' if _ROLE_BARRACKS & owned_types else 'no'}")
+    role_status.append(f"war_factory={'yes' if _ROLE_WAR_FACTORY & owned_types else 'no'}")
+    role_status.append(f"radar={'yes' if _ROLE_RADAR & owned_types else 'no'}")
+    lines.append("Production chain: " + " ".join(role_status))
+
+    _power_tag = "OK" if power_balance >= 0 else ("LOW" if power_balance >= -30 else "CRITICAL")
+    lines.append(
+        f"Economy: funds=${funds} harvesters={harvesters} "
+        f"power={power_balance:+d} ({_power_tag})"
+    )
+
+    if avail_buildings:
+        lines.append("Can build NOW (structures): " + ", ".join(avail_buildings))
+    else:
+        if not has_fact:
+            lines.append("Can build NOW (structures): NONE — deploy MCV first.")
+        else:
+            lines.append("Can build NOW (structures): NONE (construction in progress or power out).")
+    if avail_units:
+        lines.append("Can train NOW (units): " + ", ".join(avail_units))
+    else:
+        if not (_ROLE_BARRACKS & owned_types) and not (_ROLE_WAR_FACTORY & owned_types):
+            lines.append("Can train NOW (units): NONE — no barracks/war factory.")
+        else:
+            lines.append("Can train NOW (units): NONE (no completed production building).")
+
+    # Blocked-action hints: tell the model WHY common things are off the table.
+    blocked_hints = []
+    if not has_fact:
+        blocked_hints.append("build_structure/build_and_place: requires_deployed_construction_yard=true")
+    if not (_ROLE_BARRACKS & owned_types):
+        blocked_hints.append("build_unit(infantry): missing_prerequisite=barracks|tent")
+    if not (_ROLE_WAR_FACTORY & owned_types):
+        blocked_hints.append("build_unit(vehicles): missing_prerequisite=weap")
+    if not (_ROLE_REFINERY & owned_types) and harvesters == 0:
+        blocked_hints.append("harvester: missing_prerequisite=proc (refinery)")
+    if blocked_hints:
+        lines.append("BLOCKED actions: " + " | ".join(blocked_hints))
+
+    if idle_unit_ids:
+        lines.append(f"Idle combat units (can move/attack): {idle_unit_ids}")
+
+    # Pending placements / ready-to-place
+    ready = [p.split("@")[0] for p in production_items if "@100%" in p]
+    if ready:
+        lines.append(f"READY TO PLACE NOW: {', '.join(ready)} — call place_building or advance() "
+                     "if queued via build_and_place.")
+
+    recs = _recommend_next_actions(
+        faction=faction,
+        owned_types=owned_types,
+        has_undeployed_mcv=has_mcv_undeployed,
+        available_production=available,
+        production_items=production_items,
+        harvesters=harvesters,
+        funds=funds,
+        power_balance=power_balance,
+    )
+    if recs:
+        lines.append("NEXT LEGAL STEPS (in order, take the first):")
+        for i, r in enumerate(recs[:4], 1):
+            lines.append(f"  {i}. {r}")
+
+    lines.append("=== END ACTIONABLE STATE ===")
+    return "\n".join(lines)
 
 
 def format_state_briefing(state: dict) -> str:
@@ -293,10 +477,16 @@ def format_state_briefing(state: dict) -> str:
     ore = eco.get("ore", 0)
     funds = cash + ore
 
-    parts = [
+    # Actionable-state header goes FIRST so the model sees what is and isn't
+    # legal before any positional text. This block does not depend on vision.
+    actionable = format_actionable_state(state)
+    parts = []
+    if actionable:
+        parts.append(actionable)
+    parts.extend([
         f"--- TURN BRIEFING (tick {tick}, ~{tick // 25}s game time) ---",
         f"Funds: ${funds} (cash=${cash} + ore=${ore}) | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)} | Explored: {state.get('explored_percent', 0)}%",
-    ]
+    ])
 
     # Minimap (ASCII spatial overview)
     minimap = state.get("minimap", "")
@@ -441,6 +631,33 @@ def mcp_tools_to_openai(tools: list) -> list[dict]:
     return result
 
 
+def _redact_content_for_trace(content):
+    """Return a JSON-safe, compact form of message content for the trace log.
+
+    Inline base64 image payloads from multimodal content are replaced with a
+    short placeholder so the persisted trace stays human-readable and doesn't
+    balloon to megabytes per turn.
+    """
+    if not isinstance(content, list):
+        return content
+    redacted = []
+    for part in content:
+        if not isinstance(part, dict):
+            redacted.append(part)
+            continue
+        if part.get("type") == "image_url":
+            url = ""
+            iu = part.get("image_url")
+            if isinstance(iu, dict):
+                url = iu.get("url", "")
+            if isinstance(url, str) and url.startswith("data:"):
+                size = len(url)
+                redacted.append({"type": "image_url", "image_url": {"url": f"<data_url:{size}B>"}})
+                continue
+        redacted.append(part)
+    return redacted
+
+
 def _trace_message(trace: list[dict[str, Any]], *, phase: str, turn: int, message: dict[str, Any]) -> None:
     """Record a JSON-safe message trace entry independent of history compression."""
     entry: dict[str, Any] = {
@@ -449,7 +666,7 @@ def _trace_message(trace: list[dict[str, Any]], *, phase: str, turn: int, messag
         "role": message.get("role", ""),
     }
     if "content" in message and message.get("content") is not None:
-        entry["content"] = message.get("content")
+        entry["content"] = _redact_content_for_trace(message.get("content"))
     if "tool_call_id" in message:
         entry["tool_call_id"] = message.get("tool_call_id")
     if "tool_calls" in message:
@@ -470,12 +687,100 @@ def _append_traced_message(
     _trace_message(trace, phase=phase, turn=turn, message=message)
 
 
+async def _try_attach_vision_part(env, llm_config, turn: int):
+    """Return an OpenAI-style ``image_url`` part for the current frame, or None.
+
+    Shared by the game_start prompt and the per-turn briefing so the first
+    model call also carries an image. Emits unconditional ``[VISION]`` trace
+    lines covering every gating decision.
+    """
+    vision_cfg = getattr(llm_config, "vision", None)
+    _enabled = bool(vision_cfg and getattr(vision_cfg, "enabled", False))
+    _every_n = getattr(vision_cfg, "every_n_turns", 0) if vision_cfg else 0
+    _gate_ok = _enabled and _every_n > 0 and (turn % _every_n == 0)
+    print(f"  [VISION] enabled={_enabled} gate={_gate_ok} turn={turn} "
+          f"model={llm_config.model}")
+    if not _gate_ok:
+        return None
+    try:
+        print(f"  [VISION] calling get_frame max_width={vision_cfg.max_width} "
+              f"format={vision_cfg.format}")
+        frame = await env.call_tool(
+            "get_frame",
+            max_width=int(vision_cfg.max_width or 0),
+            include_image=True,
+        )
+    except Exception as ve:
+        print(f"  [VISION] get_frame call raised — {ve}")
+        return None
+    if not isinstance(frame, dict):
+        print(f"  [VISION] get_frame returned non-dict: {type(frame).__name__}")
+        return None
+    print(f"  [VISION] get_frame returned headless={frame.get('headless')} "
+          f"tick={frame.get('tick')} "
+          f"size={frame.get('width')}x{frame.get('height')} "
+          f"bytes={frame.get('byte_size', 0)} format={frame.get('format')}")
+    if frame.get("error"):
+        print(f"  [VISION] get_frame error payload: {frame.get('error')}")
+        return None
+    if frame.get("headless"):
+        print("  [VISION] no image — game reported headless "
+              "(set game.headless=false in config.yaml or pass --visible).")
+        return None
+    b64 = frame.get("image_base64") or ""
+    if not b64:
+        print("  [VISION] no image — empty image_base64 in get_frame response.")
+        return None
+    mime = "image/png" if vision_cfg.format == "png" else f"image/{vision_cfg.format}"
+    part = {
+        "type": "image_url",
+        "image_url": {
+            "url": f"data:{mime};base64,{b64}",
+            "detail": vision_cfg.detail or "auto",
+        },
+    }
+    print(f"  [VISION] built image_url part (~{len(b64) // 1024}KB b64, "
+          f"mime={mime}, detail={part['image_url']['detail']})")
+    return part
+
+
+def _content_to_parts(content) -> list[dict]:
+    """Normalize message content to a list of OpenAI-style content parts.
+
+    Strings are wrapped into a single ``{"type": "text", "text": ...}`` part.
+    Lists are assumed to already use that format and are returned as-is.
+    ``None`` collapses to an empty list.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if isinstance(content, list):
+        return list(content)
+    # Unknown shape — stringify defensively so we never crash the sanitizer.
+    return [{"type": "text", "text": str(content)}]
+
+
+def _merge_user_contents(a, b):
+    """Return merged content for two consecutive user messages.
+
+    When both are plain strings we keep the simple string form (unchanged
+    behavior). When either side contains multimodal parts (list form), we
+    promote the result to a list so image parts survive the merge.
+    """
+    if isinstance(a, str) and isinstance(b, str):
+        return a + "\n\n" + b
+    parts = _content_to_parts(a) + _content_to_parts(b)
+    return parts
+
+
 def _sanitize_messages(messages: list[dict], prompts=None) -> list[dict]:
     """Merge consecutive same-role messages for strict-alternation models (e.g. Mistral).
 
     Some models require strict user/assistant alternation and reject sequences
     like ``user → user`` or ``tool → user``.  This helper:
     1. Merges consecutive ``user`` messages by joining their content with newlines.
+       Multimodal (list) content is preserved — image parts are carried through.
     2. Inserts a bridge ``assistant`` message when a ``tool`` result is followed
        by a ``user`` message (Mistral requires tool → assistant → user).
     """
@@ -488,7 +793,10 @@ def _sanitize_messages(messages: list[dict], prompts=None) -> list[dict]:
         prev = merged[-1]
         # Merge consecutive user messages
         if msg["role"] == "user" and prev["role"] == "user":
-            merged[-1] = {**prev, "content": prev["content"] + "\n\n" + msg["content"]}
+            merged[-1] = {
+                **prev,
+                "content": _merge_user_contents(prev.get("content"), msg.get("content")),
+            }
             continue
         # Bridge: tool → user needs an assistant message in between
         if msg["role"] == "user" and prev["role"] == "tool":
@@ -535,6 +843,51 @@ async def chat_completion(
             roles = [m.get("role", "?") for m in clean_messages]
             print(f"  [LLM] Sending {n_msgs} messages to {llm_config.model}...")
             print(f"  [LLM] Roles: {' → '.join(roles)}")
+
+        # Unconditional pre-POST payload shape dump: confirms whether the
+        # final body actually carries multimodal image_url parts, or whether
+        # some earlier step flattened them back to plain strings. No base64
+        # bytes are printed — we only report content type and part shapes.
+        try:
+            _shape_lines = []
+            _has_image_part = False
+            for _idx, _m in enumerate(clean_messages[-6:]):  # tail only, keep logs short
+                _role = _m.get("role", "?")
+                _c = _m.get("content")
+                if isinstance(_c, str):
+                    _shape_lines.append(f"    [{_idx}] role={_role} content=str(len={len(_c)})")
+                elif isinstance(_c, list):
+                    _types = []
+                    for _p in _c:
+                        if not isinstance(_p, dict):
+                            _types.append(type(_p).__name__)
+                            continue
+                        _t = _p.get("type", "?")
+                        if _t == "image_url":
+                            _has_image_part = True
+                            _iu = _p.get("image_url") or {}
+                            _url = _iu.get("url", "") if isinstance(_iu, dict) else ""
+                            _detail = _iu.get("detail", "?") if isinstance(_iu, dict) else "?"
+                            if isinstance(_url, str) and _url.startswith("data:"):
+                                _types.append(f"image_url(data:{len(_url)}B,detail={_detail})")
+                            else:
+                                _types.append(f"image_url(url,detail={_detail})")
+                        elif _t == "text":
+                            _txt = _p.get("text", "") or ""
+                            _types.append(f"text(len={len(_txt)})")
+                        else:
+                            _types.append(_t)
+                    _shape_lines.append(f"    [{_idx}] role={_role} content=list[{', '.join(_types)}]")
+                elif _c is None:
+                    _shape_lines.append(f"    [{_idx}] role={_role} content=None")
+                else:
+                    _shape_lines.append(f"    [{_idx}] role={_role} content={type(_c).__name__}")
+            print(f"  [LLM/POST] model={llm_config.model} tail of {len(clean_messages)} msgs "
+                  f"(image_url present = {_has_image_part}):")
+            for _line in _shape_lines:
+                print(_line)
+        except Exception as _dump_err:
+            print(f"  [LLM/POST] payload-shape dump failed: {_dump_err}")
 
         response = await client.post(
             llm_config.base_url,
@@ -715,6 +1068,37 @@ async def run_agent(config, verbose: bool = False):
     if is_local and llm_config.request_timeout_s <= 120.0:
         llm_config = llm_config.model_copy(update={"request_timeout_s": 300.0})
 
+    # Auto-enable vision when the model name looks multimodal AND the user
+    # hasn't explicitly opted out. Default VisionConfig.enabled is False, which
+    # silently drops the image_url branch even when a VL model is configured.
+    # Detect common vision-capable families by name so that qwen3-vl, llava,
+    # pixtral, gpt-4o, claude-3.*, gemini-*, internvl, etc. "just work".
+    _VL_MARKERS = (
+        "-vl", "vl-", "vision", "llava", "pixtral", "internvl", "cogvlm",
+        "gpt-4o", "gpt-4.1", "gpt-5", "claude-3", "claude-4", "claude-sonnet",
+        "claude-opus", "claude-haiku", "gemini", "janus", "molmo", "minicpm-v",
+        "phi-3-vision", "phi-3.5-vision",
+    )
+    _model_lower = (llm_config.model or "").lower()
+    _looks_vl = any(m in _model_lower for m in _VL_MARKERS)
+    _vision_cfg = llm_config.vision
+    if _looks_vl and not _vision_cfg.enabled:
+        from openra_env.config import VisionConfig as _VC
+        _new_vision = _VC(
+            enabled=True,
+            every_n_turns=_vision_cfg.every_n_turns or 1,
+            max_width=_vision_cfg.max_width or 1024,
+            format=_vision_cfg.format or "png",
+            detail=_vision_cfg.detail or "auto",
+        )
+        llm_config = llm_config.model_copy(update={"vision": _new_vision})
+        print(f"  [VISION] auto-enabled for model '{llm_config.model}' "
+              f"(matched vision-family heuristic). Set llm.vision.enabled=false in "
+              f"config.yaml to disable.")
+    else:
+        print(f"  [VISION] config-level enabled={_vision_cfg.enabled} "
+              f"looks_vl={_looks_vl} model={llm_config.model}")
+
     print(f"Connecting to {url}...")
     print(f"Model: {llm_config.model} @ {llm_config.base_url}")
     if is_local:
@@ -847,6 +1231,8 @@ async def run_agent(config, verbose: bool = False):
 
                 # Planning loop (bounded by max_planning_turns + margin)
                 planning_done = False
+                _plan_last_content: str | None = None
+                _plan_no_tool_streak = 0
                 for planning_turn in range(max_planning_turns + 2):
                     try:
                         response = await chat_completion(messages, openai_tools, llm_config, verbose, prompts=config.prompts)
@@ -871,7 +1257,27 @@ async def run_agent(config, verbose: bool = False):
                         print(f"  [Planning] {assistant_msg['content'][:200]}")
 
                     tool_calls = assistant_msg.get("tool_calls", [])
+                    _plan_text = (assistant_msg.get("content") or "")[:200].strip()
+                    _plan_is_repeat = (_plan_last_content is not None
+                                       and _plan_text == _plan_last_content
+                                       and not tool_calls)
+                    _plan_last_content = _plan_text
                     if not tool_calls:
+                        _plan_no_tool_streak += 1
+                        print(
+                            f"  [LOOP-WATCH/plan] planning_turn={planning_turn + 1} "
+                            f"no_tool_streak={_plan_no_tool_streak} "
+                            f"repeat_of_prev={_plan_is_repeat} "
+                            f"assistant_preview={_plan_text[:80]!r}"
+                        )
+                        if _plan_no_tool_streak >= 3:
+                            print(
+                                f"  [LOOP-WATCH/plan] breaking out: {_plan_no_tool_streak} "
+                                "consecutive planning turns with no tool call. "
+                                "Model is echoing the planning prompt without "
+                                "acting — will force end_planning_phase and proceed."
+                            )
+                            break
                         _append_traced_message(
                             messages,
                             trace_messages,
@@ -883,6 +1289,8 @@ async def run_agent(config, verbose: bool = False):
                             },
                         )
                         continue
+                    else:
+                        _plan_no_tool_streak = 0
 
                     for tc in tool_calls:
                         fn_name = tc["function"]["name"]
@@ -983,19 +1391,12 @@ async def run_agent(config, verbose: bool = False):
         mcv_note = f" Your MCV is unit {mcv_id}." if mcv_id else ""
 
         game_start_prompts = config.prompts
-        _append_traced_message(
-            messages,
-            trace_messages,
-            phase="gameplay",
-            turn=0,
-            message={
-                "role": "user",
-                "content": game_start_prompts.game_start.format(
-                    strategy_section=strategy_section,
-                    briefing=briefing,
-                    barracks_type=barracks_type,
-                    mcv_note=mcv_note,
-                ) + f"""
+        _game_start_text = game_start_prompts.game_start.format(
+            strategy_section=strategy_section,
+            briefing=briefing,
+            barracks_type=barracks_type,
+            mcv_note=mcv_note,
+        ) + f"""
 
                 STYLE: {STYLE_TOKEN}
 
@@ -1007,8 +1408,24 @@ async def run_agent(config, verbose: bool = False):
                 - econ_boom = prioritize growth and expansion
 
                 Use tools to act, but let style guide your choices.
-                """,
-            },
+                """
+        # Attach an image to the very first gameplay POST too. The old code
+        # only attached images when total_api_calls > 0, which meant turn 1
+        # was always text-only even for vision-capable models.
+        _start_vision_part = await _try_attach_vision_part(env, llm_config, turn=1)
+        if _start_vision_part is not None:
+            _game_start_content = [
+                {"type": "text", "text": _game_start_text},
+                _start_vision_part,
+            ]
+        else:
+            _game_start_content = _game_start_text
+        _append_traced_message(
+            messages,
+            trace_messages,
+            phase="gameplay",
+            turn=0,
+            message={"role": "user", "content": _game_start_content},
         )
 
         total_tool_calls = 0
@@ -1025,6 +1442,20 @@ async def run_agent(config, verbose: bool = False):
         _checkpoint_just_fired = False
 
         turn = 0
+        # Turn-level progression / repeat detection state. These let us:
+        #   - emit the requested compact [TURN] summary log,
+        #   - detect when the game state isn't advancing (tick unchanged),
+        #   - spot the "model loops on the same nudge without tool calls"
+        #     pattern that user saw as a repeating planning message.
+        _prev_state_tick: int | None = None
+        _last_assistant_content: str | None = None
+        _no_tool_call_streak = 0
+        # Repeat-attempt detector: track consecutive failed (tool, args-key)
+        # invocations. Logs [TOOL-REPEAT] when the model keeps asking for the
+        # same illegal action (e.g. build_unit('e1') without a barracks).
+        _failed_call_counts: dict[str, int] = {}
+        _last_failed_call_key: str | None = None
+        _image_attached_last_turn = False
         while True:
             # Check limits
             elapsed = time.time() - start_time
@@ -1044,20 +1475,33 @@ async def run_agent(config, verbose: bool = False):
                     compression=config.prompts.compression)
 
             # Inject state briefing before LLM thinks (skip first turn — initial state already provided)
+            _turn_state_tick: int | None = _prev_state_tick
+            _image_attached_this_turn = False
             if total_api_calls > 0:
                 try:
                     briefing_state = await env.call_tool("get_game_state")
                     # Track in-game events for cross-episode reflection
                     if event_tracker and isinstance(briefing_state, dict):
                         event_tracker.update_from_state(briefing_state)
+                    if isinstance(briefing_state, dict):
+                        _turn_state_tick = briefing_state.get("tick", _turn_state_tick)
                     briefing = format_state_briefing(briefing_state)
                     if briefing:
+                        vision_part = await _try_attach_vision_part(env, llm_config, turn=turn)
+                        if vision_part is not None:
+                            briefing_content = [
+                                {"type": "text", "text": briefing},
+                                vision_part,
+                            ]
+                            _image_attached_this_turn = True
+                        else:
+                            briefing_content = briefing
                         _append_traced_message(
                             messages,
                             trace_messages,
                             phase="gameplay",
                             turn=turn,
-                            message={"role": "user", "content": briefing},
+                            message={"role": "user", "content": briefing_content},
                         )
                         if verbose:
                             # Print just the alerts
@@ -1183,7 +1627,50 @@ async def run_agent(config, verbose: bool = False):
 
             # Handle tool calls
             tool_calls = assistant_msg.get("tool_calls", [])
+            _assistant_text = (assistant_msg.get("content") or "")[:200].strip()
+            _is_repeat_of_prev = (
+                _last_assistant_content is not None
+                and _assistant_text == _last_assistant_content
+                and not tool_calls
+            )
+            _last_assistant_content = _assistant_text
             if not tool_calls:
+                _no_tool_call_streak += 1
+                # One-line summary explaining WHY the loop is about to re-nudge.
+                print(
+                    f"  [LOOP-WATCH] turn={turn} no_tool_call_streak={_no_tool_call_streak} "
+                    f"repeat_of_prev={_is_repeat_of_prev} "
+                    f"state_tick={_turn_state_tick} "
+                    f"assistant_preview={_assistant_text[:80]!r}"
+                )
+                # Compact turn summary BEFORE continuing the loop so it fires
+                # every iteration, even ones without tool calls.
+                print(
+                    f"  [TURN] n={turn} state_tick={_turn_state_tick} "
+                    f"vision={bool(getattr(llm_config.vision, 'enabled', False))} "
+                    f"image_attached={_image_attached_this_turn} "
+                    f"tool_calls=0 progressed={_turn_state_tick != _prev_state_tick}"
+                )
+                _prev_state_tick = _turn_state_tick
+                _image_attached_last_turn = _image_attached_this_turn
+
+                # Escalation: if the model loops on the same text without
+                # tool-calling N times in a row, it is almost certainly unable
+                # to tool-call in the current context. Stop so the user sees
+                # the problem instead of burning the whole turn budget on
+                # identical no-op prompts.
+                if _no_tool_call_streak >= 5:
+                    print(
+                        f"  [LOOP-WATCH] stopping: {_no_tool_call_streak} consecutive "
+                        f"turns with no tool call (model={llm_config.model}). "
+                        "This usually means the model cannot reliably emit tool "
+                        "calls through this endpoint. Check: (1) provider supports "
+                        "tools on /v1/chat/completions, (2) model card lists tool "
+                        "calling, (3) Ollama version is recent."
+                    )
+                    encountered_agent_error = True
+                    break
+
                 # No tool calls — prompt to act
                 if verbose:
                     content = assistant_msg.get("content", "(no content)")
@@ -1199,6 +1686,8 @@ async def run_agent(config, verbose: bool = False):
                     },
                 )
                 continue
+            else:
+                _no_tool_call_streak = 0
 
             # Execute each tool call
             for tc in tool_calls:
@@ -1246,6 +1735,66 @@ async def run_agent(config, verbose: bool = False):
                         encountered_agent_error = True
                         game_done = True
 
+                # Repeat-attempt detector. A "failed" call here means the tool
+                # returned an error or a missing_prerequisite marker. We key by
+                # (tool_name, most-specific arg) so build_unit('e1') and
+                # build_unit('e3') are tracked separately.
+                _is_failed = (
+                    isinstance(result, dict)
+                    and (
+                        "error" in result
+                        or "missing_prerequisite" in result
+                        or result.get("requires_deployed_construction_yard")
+                        or result.get("no_production_buildings")
+                    )
+                )
+                if _is_failed:
+                    _key_arg = (
+                        fn_args.get("building_type")
+                        or fn_args.get("unit_type")
+                        or fn_args.get("unit_id")
+                        or fn_args.get("item_type")
+                        or ""
+                    )
+                    _rkey = f"{fn_name}:{_key_arg}"
+                    _failed_call_counts[_rkey] = _failed_call_counts.get(_rkey, 0) + 1
+                    _prereq = (result.get("missing_prerequisite")
+                               or result.get("missing_prerequisites")
+                               or "")
+                    print(
+                        f"  [TOOL-REPEAT] turn={turn} call={_rkey} "
+                        f"failed_count={_failed_call_counts[_rkey]} "
+                        f"reason={result.get('error', '?')[:80]!r} "
+                        f"missing_prerequisite={_prereq}"
+                    )
+                    if _failed_call_counts[_rkey] == 3:
+                        # Inject a one-shot corrective hint so the model stops
+                        # hammering the same illegal call. Uses a separate
+                        # user message rather than modifying the tool result.
+                        _hint = (
+                            f"[HINT] You've attempted {_rkey} {_failed_call_counts[_rkey]} times "
+                            f"and it keeps failing with: {result.get('error', 'unknown')}. "
+                            "Read the ACTIONABLE STATE block and do the first "
+                            "listed NEXT LEGAL STEP instead of retrying this."
+                        )
+                        _append_traced_message(
+                            messages, trace_messages,
+                            phase="gameplay", turn=turn,
+                            message={"role": "user", "content": _hint},
+                        )
+                    _last_failed_call_key = _rkey
+                else:
+                    # Clear the streak for this key on success so transient
+                    # failures don't permanently mark an action as unusable.
+                    _key_arg = (
+                        fn_args.get("building_type")
+                        or fn_args.get("unit_type")
+                        or fn_args.get("unit_id")
+                        or fn_args.get("item_type")
+                        or ""
+                    )
+                    _failed_call_counts.pop(f"{fn_name}:{_key_arg}", None)
+
                 # Format result for message
                 result_str = json.dumps(result) if not isinstance(result, str) else result
 
@@ -1271,6 +1820,19 @@ async def run_agent(config, verbose: bool = False):
                     if len(result_preview) > 500:
                         result_preview = result_preview[:500] + "..."
                     print(f"  [Result] {result_preview}")
+
+            # Per-turn compact summary: confirms whether anything about the
+            # game state actually advanced this turn. If state_tick is stuck
+            # and tool_calls=0 repeatedly, we are in a no-progress loop.
+            print(
+                f"  [TURN] n={turn} state_tick={_turn_state_tick} "
+                f"vision={bool(getattr(llm_config.vision, 'enabled', False))} "
+                f"image_attached={_image_attached_this_turn} "
+                f"tool_calls={len(tool_calls)} "
+                f"progressed={_turn_state_tick != _prev_state_tick}"
+            )
+            _prev_state_tick = _turn_state_tick
+            _image_attached_last_turn = _image_attached_this_turn
 
             # Status update
             if total_api_calls % 5 == 0 or game_done:

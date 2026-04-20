@@ -12,7 +12,11 @@ game:
 #   mod: "ra"                         # Game mod (ra, cnc, d2k)
 #   map_name: "singles.oramap"        # Map to play
 #   grpc_port: 9999                   # gRPC bridge port
-#   headless: true                    # Use Null renderer (no GPU)
+  headless: false                    # Use Null renderer (no GPU). Set false to open a visible window you can watch live.
+  window_width: 1280                # Visible-mode window width (headless: false only)
+  window_height: 960                # Visible-mode window height (headless: false only)
+  window_mode: "Windowed"           # Windowed | Fullscreen | PseudoFullscreen (headless: false only)
+#   vsync: false
   record_replays: true                # Save .orarep replay files ($RECORD_REPLAYS)
 #   seed: null                        # RNG seed for reproducibility (null = random)
 #   max_ticks: 0                      # End game after N ticks (0 = unlimited)
@@ -110,6 +114,12 @@ opponent:
 #   extra_headers:                    # Custom headers (OpenRouter-specific)
 #     HTTP-Referer: "https://github.com/openra-rl"
 #     X-Title: "OpenRA-RL Agent"
+  vision:                             # Attach rendered frames to each turn briefing
+    enabled: true                    # Requires game.headless=false AND a vision-capable model
+    every_n_turns: 1                  # Attach a frame every N turns (1 = every turn)
+    max_width: 1024                   # Downsample width (0 = native)
+    format: "png"                     # png | jpeg (jpeg reserved for future use)
+    detail: "auto"                    # OpenAI image_url detail: auto | low | high
 
 # ── Agent Runtime ─────────────────────────────────────────────────────
 # agent:

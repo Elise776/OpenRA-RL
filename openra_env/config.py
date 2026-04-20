@@ -33,6 +33,13 @@ class GameConfig(BaseModel):
     max_ticks: int = 0  # 0 = unlimited
     max_wall_time_s: int = 0  # 0 = unlimited
 
+    # Live visible-mode graphics options (only consumed when headless=False).
+    # Leave at defaults for headless training runs — the launcher omits them.
+    window_width: int = 1280
+    window_height: int = 960
+    window_mode: str = "Windowed"  # Windowed | Fullscreen | PseudoFullscreen
+    vsync: bool = False
+
 
 class OpponentConfig(BaseModel):
     # bot_type: difficulty tiers (beginner/easy/medium/hard/brutal)
@@ -121,6 +128,19 @@ class AlertsConfig(BaseModel):
     max_alerts: int = 0  # 0 = unlimited; set >0 to cap alerts per turn
 
 
+class VisionConfig(BaseModel):
+    """Agent-side vision settings. When enabled, the agent attaches a rendered
+    frame of the current game state to each turn briefing as a multimodal
+    image_url content part. Requires both a vision-capable LLM and the game
+    running non-headless (GameConfig.headless=false)."""
+
+    enabled: bool = False
+    every_n_turns: int = 1           # Attach a frame every N turns (1 = every turn).
+    max_width: int = 1024             # Downsample width passed to GetFrame (0 = native).
+    format: str = "png"               # Reserved for future "jpeg".
+    detail: str = "auto"              # OpenAI image_url detail: "auto" | "low" | "high".
+
+
 class LLMConfig(BaseModel):
     base_url: str = "https://openrouter.ai/api/v1/chat/completions"
     api_key: str = ""
@@ -135,6 +155,7 @@ class LLMConfig(BaseModel):
     retry_backoff_s: int = 10
     request_timeout_s: float = 120.0
     reasoning_effort: Optional[str] = None  # "none", "low", "medium", "high"
+    vision: VisionConfig = Field(default_factory=VisionConfig)
     extra_headers: dict[str, str] = Field(
         default_factory=lambda: {
             "HTTP-Referer": "https://github.com/openra-rl",
@@ -386,6 +407,7 @@ TOOL_CATEGORIES: dict[str, str] = {
     "plan": "compound",
     # Utility
     "get_replay_path": "utility",
+    "get_frame": "utility",
     "surrender": "utility",
     # Terrain
     "get_terrain_at": "terrain",

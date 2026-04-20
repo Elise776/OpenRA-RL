@@ -260,6 +260,10 @@ class OpenRAEnvironment(MCPEnvironment):
             record_replays=cfg.game.record_replays,
             headless=cfg.game.headless,
             seed=cfg.game.seed,
+            window_width=cfg.game.window_width,
+            window_height=cfg.game.window_height,
+            window_mode=cfg.game.window_mode,
+            vsync=cfg.game.vsync,
         )
         if not multi_session:
             self._process = OpenRAProcessManager(self._config)
@@ -1507,7 +1511,11 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {
+                    "error": "No matching units found",
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             commands = [
                 CommandModel(action=ActionType.MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
@@ -1526,7 +1534,11 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {
+                    "error": "No matching units found",
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             commands = [
                 CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
@@ -1545,7 +1557,11 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {
+                    "error": "No matching units found",
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             commands = [
                 CommandModel(action=ActionType.ATTACK, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
                 for uid in resolved
@@ -1560,7 +1576,11 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {
+                    "error": "No matching units found",
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             commands = [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in resolved]
             result = env._execute_commands(commands)
             return env._add_unit_feedback(result, resolved)
@@ -1569,7 +1589,16 @@ class OpenRAEnvironment(MCPEnvironment):
         def build_unit(unit_type: str, count: int = 1) -> dict:
             """Start training units (infantry, vehicle, aircraft, ship).
             The unit_type is the internal name (e.g., 'e1', '3tnk', 'mig').
-            Use count > 1 to queue multiple of the same type."""
+            Use count > 1 to queue multiple of the same type.
+
+            PREREQUISITES (must be met before this tool will succeed):
+              - Infantry (e1, e3, ...): requires a Barracks (Allied: 'tent', Soviet: 'barr').
+              - Vehicles (3tnk, jeep, ...): requires a War Factory ('weap').
+              - Aircraft/ships: require helipad ('hpad') / sub pen ('spen') / etc.
+              - All production buildings in turn require a deployed MCV
+                (Construction Yard, 'fact') and sufficient power.
+            If prereqs are missing this tool returns an error with
+            `missing_prerequisite` and `no_production_buildings` flags."""
             # Validate against available production
             env._refresh_obs()
             if env._last_obs:
@@ -1579,6 +1608,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     return {
                         "error": "No production buildings available. Build a Construction Yard (deploy MCV), Barracks, War Factory, etc. first.",
                         "available_units": [],
+                        "no_production_buildings": True,
+                        "missing_prerequisite": "construction_yard",
                     }
                 if unit_type not in available:
                     all_buildings = get_all_building_types()
@@ -1590,6 +1621,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     }
                     if "missing_prerequisites" in diag:
                         result["missing_prerequisites"] = diag["missing_prerequisites"]
+                        if diag["missing_prerequisites"]:
+                            result["missing_prerequisite"] = diag["missing_prerequisites"][0]
                     return result
                 # Check funds
                 eco = env._last_obs.get("economy", {})
@@ -1623,7 +1656,15 @@ class OpenRAEnvironment(MCPEnvironment):
             After calling this, call advance(ticks) to let construction finish,
             then call place_building() to place it on the map.
             Prefer build_and_place() which handles placement automatically.
-            building_type: internal name (e.g., 'powr', 'barr', 'weap')."""
+            building_type: internal name (e.g., 'powr', 'barr', 'weap').
+
+            PREREQUISITES:
+              - REQUIRES a deployed Construction Yard ('fact'). If your MCV
+                is not yet deployed, call deploy_unit(mcv_id) FIRST.
+              - Requires sufficient cash and that the building_type's tech
+                prerequisites (e.g., barracks before war factory) are met.
+            If the Construction Yard is missing this tool returns an error
+            with `requires_deployed_construction_yard: true`."""
             # Reject if same building already in production queue
             env._refresh_obs()
             if env._last_obs:
@@ -1632,6 +1673,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     return {
                         "error": "No Construction Yard (fact) — requires MCV deployment to build.",
                         "available_buildings": [],
+                        "requires_deployed_construction_yard": True,
+                        "missing_prerequisite": "construction_yard",
                     }
                 if building_type not in available:
                     all_buildings = get_all_building_types()
@@ -1643,6 +1686,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     }
                     if "missing_prerequisites" in diag:
                         result["missing_prerequisites"] = diag["missing_prerequisites"]
+                        if diag["missing_prerequisites"]:
+                            result["missing_prerequisite"] = diag["missing_prerequisites"][0]
                     return result
                 if building_type in env._pending_placements:
                     return {"note": env._app_config.prompts.build_already_pending.format(
@@ -1683,7 +1728,16 @@ class OpenRAEnvironment(MCPEnvironment):
             complete — the building auto-places once done. Do NOT call
             place_building() on buildings queued this way — placement is automatic.
             Coordinates are optional — the engine finds a valid position near
-            your base if omitted. Returns updated game summary."""
+            your base if omitted. Returns updated game summary.
+
+            PREREQUISITES:
+              - REQUIRES a deployed Construction Yard ('fact'). If your MCV
+                is not yet deployed, call deploy_unit(mcv_id) FIRST.
+              - Tech prereqs: powr → proc → barr/tent → weap → dome, etc.
+            Early-game order: deploy MCV → build_and_place('powr')
+              → build_and_place('proc') → build_and_place('tent' or 'barr').
+            If the Construction Yard is missing this tool returns an error
+            with `requires_deployed_construction_yard: true`."""
             # Validate and reject duplicates
             env._refresh_obs()
             if env._last_obs:
@@ -1692,6 +1746,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     return {
                         "error": "No Construction Yard (fact) — requires MCV deployment to build.",
                         "available_buildings": [],
+                        "requires_deployed_construction_yard": True,
+                        "missing_prerequisite": "construction_yard",
                     }
                 if building_type not in available:
                     all_buildings = get_all_building_types()
@@ -1703,6 +1759,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     }
                     if "missing_prerequisites" in diag:
                         result["missing_prerequisites"] = diag["missing_prerequisites"]
+                        if diag["missing_prerequisites"]:
+                            result["missing_prerequisite"] = diag["missing_prerequisites"][0]
                     return result
                 if building_type in env._pending_placements:
                     return {"note": env._app_config.prompts.build_already_pending.format(
@@ -1743,7 +1801,14 @@ class OpenRAEnvironment(MCPEnvironment):
             The building must be at 100% in the production queue or this will error.
             Do NOT use this on buildings queued via build_and_place() — those
             auto-place via advance(). Cell coordinates are optional — the engine
-            auto-finds a valid position near your base if omitted."""
+            auto-finds a valid position near your base if omitted.
+
+            PREREQUISITES:
+              - The building must have been queued via build_structure() AND
+                finished construction (progress >= 1.0 in production queue).
+              - If construction is still in progress, call advance(ticks)
+                until complete, THEN call place_building.
+            Returns `not_ready_to_place: true` if the building is not at 100%."""
             # Guard: building queued via build_and_place auto-places
             if building_type in env._pending_placements:
                 return {
@@ -1763,6 +1828,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     return {
                         "error": f"'{building_type}' not ready to place — not at 100% in production queue.",
                         "tick": pre_obs.get("tick", 0),
+                        "not_ready_to_place": True,
+                        "missing_prerequisite": "construction_complete",
                     }
 
             env._pending_placements.pop(building_type, None)
@@ -1785,13 +1852,25 @@ class OpenRAEnvironment(MCPEnvironment):
 
         @configurable_tool
         def deploy_unit(unit_id: int) -> dict:
-            """Deploy a unit (e.g., MCV → Construction Yard)."""
+            """Deploy a unit (e.g., MCV → Construction Yard).
+
+            PREREQUISITES:
+              - unit_id must be an existing, owned unit with deploy ability
+                (most common: MCV 'mcv' → Construction Yard 'fact').
+              - The very first action of a standard match is usually
+                deploy_unit(<your_mcv_id>) to place your Construction Yard.
+            Returns `no_unit_selected: true` if unit_id is not present in
+            your roster (destroyed, never existed, or wrong id)."""
             env._refresh_obs()
             obs = env._last_obs or {}
             units = obs.get("units", [])
             if not any(u.get("actor_id") == unit_id for u in units):
-                return {"error": f"Unit {unit_id} not found. It may have been destroyed.",
-                        "your_units": [{"id": u["actor_id"], "type": u["type"]} for u in units[:20]]}
+                return {
+                    "error": f"Unit {unit_id} not found. It may have been destroyed.",
+                    "your_units": [{"id": u["actor_id"], "type": u["type"]} for u in units[:20]],
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             commands = [CommandModel(action=ActionType.DEPLOY, actor_id=unit_id)]
             return env._execute_commands(commands)
 
@@ -1839,7 +1918,11 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {
+                    "error": "No matching units found",
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             commands = [
                 CommandModel(action=ActionType.GUARD, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
                 for uid in resolved
@@ -1854,7 +1937,11 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {
+                    "error": "No matching units found",
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             commands = [
                 CommandModel(action=ActionType.PATROL, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
@@ -1878,7 +1965,11 @@ class OpenRAEnvironment(MCPEnvironment):
                 return {"error": f"Unit {transport_id} ({transport['type']}) is not a transport."}
             resolved = env._resolve_unit_ids(unit_ids, obs)
             if not resolved:
-                return {"error": "No matching units found"}
+                return {
+                    "error": "No matching units found",
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             resolved = [uid for uid in resolved if uid != transport_id]
             if not resolved:
                 return {"error": "No valid passengers found (transport cannot load itself)"}
@@ -1914,7 +2005,11 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {
+                    "error": "No matching units found",
+                    "no_unit_selected": True,
+                    "missing_prerequisite": "valid_unit_id",
+                }
             stance_map = {"hold_fire": 0, "return_fire": 1, "defend": 2, "attack_anything": 3}
             stance_val = stance_map.get(stance.lower(), 3)
             commands = [
@@ -2082,6 +2177,50 @@ class OpenRAEnvironment(MCPEnvironment):
             result["group"] = group_name
             result["units_commanded"] = len(ids)
             return env._add_unit_feedback(result, ids)
+
+        @configurable_tool
+        def get_frame(max_width: int = 0, include_image: bool = True) -> dict:
+            """Capture a real rendered frame from the running OpenRA client.
+
+            Only works when the game is running non-headless (headless=false in
+            GameConfig — i.e. Game.Platform=Default). When the game is headless
+            the server returns {"headless": True, "image_base64": ""}.
+
+            Args:
+                max_width: Downsample output to this width (keeps aspect ratio).
+                           0 = native resolution.
+                include_image: If False, omit the base64 payload and return only
+                               metadata (width/height/tick/headless). Useful to
+                               check availability cheaply.
+
+            Returns:
+                {
+                  "image_base64": str,  # base64-encoded PNG (empty when headless)
+                  "width": int,
+                  "height": int,
+                  "format": "png",
+                  "tick": int,
+                  "headless": bool,
+                }
+            """
+            import base64 as _b64
+            try:
+                result = env._bridge.get_frame(max_width=int(max_width or 0))
+            except Exception as e:
+                return {"error": f"GetFrame RPC failed: {e}"}
+
+            image_bytes = result.get("image", b"") or b""
+            payload = {
+                "width": result.get("width", 0),
+                "height": result.get("height", 0),
+                "format": result.get("format", "png"),
+                "tick": result.get("tick", 0),
+                "headless": bool(result.get("headless", False)),
+                "byte_size": len(image_bytes),
+            }
+            if include_image:
+                payload["image_base64"] = _b64.b64encode(image_bytes).decode("ascii") if image_bytes else ""
+            return payload
 
         @configurable_tool
         def get_replay_path() -> dict:
