@@ -54,7 +54,7 @@ OpenRA). The submodule is pinned to a commit that includes the gRPC
 bridge, `GetFrame` support, and interrupt-handling fixes.
 
 ```bash
-git clone --recurse-submodules <this-repo-url>
+git clone --recurse-submodules [https://github.com/Elise776/OpenRA-RL](https://github.com/Elise776/OpenRA-RL)
 cd OpenRA-RL
 
 # Or, if already cloned without --recurse-submodules:
