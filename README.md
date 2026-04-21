@@ -90,8 +90,7 @@ runtime libraries. Remember the absolute path — that's your `OPENRA_PATH`.
 # Linux/macOS:
 python -m venv .venv
 source .venv/bin/activate
-
-# Windows is not necessary
+# Windows is not necessary to set up environment
 
 pip install -e ".[dev]"
 ```
