@@ -87,11 +87,11 @@ runtime libraries. Remember the absolute path — that's your `OPENRA_PATH`.
 ### 2. Install Python dependencies
 
 ```bash
-python -m venv .venv
 # Linux/macOS:
+python -m venv .venv
 source .venv/bin/activate
-# Windows:
-.venv\Scripts\activate
+
+# Windows is not necessary
 
 pip install -e ".[dev]"
 ```
